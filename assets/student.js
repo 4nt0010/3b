@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential,
   EmailAuthProvider, collection, doc, onSnapshot, query, where, getDoc, setDoc, updateDoc, addDoc, serverTimestamp,
-} from './firebase.js?v=6';
-import * as C from './core.js?v=6';
+} from './firebase.js?v=7';
+import * as C from './core.js?v=7';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, rulesList, eventCard,
-} from './ui.js?v=6';
+} from './ui.js?v=7';
 
 const root = document.getElementById('app');
 const S = fresh();

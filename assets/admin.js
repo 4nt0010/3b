@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
-  collection, doc, onSnapshot, getDoc, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
-} from './firebase.js?v=6';
-import * as C from './core.js?v=6';
+  collection, doc, onSnapshot, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
+} from './firebase.js?v=7';
+import * as C from './core.js?v=7';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, toggleRow,
-} from './ui.js?v=6';
+} from './ui.js?v=7';
 
 const root = document.getElementById('app');
 const A = fresh();
@@ -237,8 +237,7 @@ function renderRound(main, r) {
   const actions = h('div', { class: 'row wrap' });
   if (r.status === 'draft') actions.append(
     h('button', { class: 'btn lime', onclick: () => upd({ status: 'voting', visible: true }, 'Votazione aperta') }, 'Apri votazione'),
-    h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica'),
-    h('button', { class: 'btn danger-ghost', onclick: () => deleteRound(r) }, icon('trash'), 'Elimina'));
+    h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica'));
   if (r.status === 'voting') actions.append(
     h('button', { class: 'btn', onclick: async () => { if (await confirmSheet('Chiudere la votazione?', `Hanno votato ${voted.length} studenti su ${n}. Dopo la chiusura nessuno potrà più cambiare scelta (puoi sempre riaprirla).`, 'Chiudi votazione')) upd({ status: 'closed' }, 'Votazione chiusa'); } }, 'Chiudi votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica date'));
@@ -312,16 +311,30 @@ function renderRound(main, r) {
     if (recs.length) body.push(h('div', { class: 'card danger', style: { marginTop: '10px' } }, h('b', {}, 'Da recuperare: '), recs.map(x => C.fullName(st(x.uid))).join(', '),
       h('div', { class: 'small' }, 'Assegna le nuove date dalla sezione Richieste.')));
   }
+  body.push(h('div', { class: 'section-title', style: { marginTop: '32px' } }, 'Elimina'),
+    h('div', { class: 'card danger' },
+      h('p', { class: 'small', style: { marginBottom: '10px' } }, 'Cancella il giro e tutto ciò che è collegato: voti, posti, date pubblicate nel calendario, "da recuperare" e scambi. Non si può annullare.'),
+      h('button', { class: 'btn block danger', onclick: () => deleteRound(r) }, icon('trash'), 'Elimina giro definitivamente')));
   page(main, hero, body);
 }
 
 async function deleteRound(r) {
-  if (!await confirmSheet('Eliminare il giro?', 'Il giro in bozza verrà eliminato definitivamente.', 'Elimina', true)) return;
+  const evs = roundEvents(r); const evIds = new Set(evs.map(e => e.id));
+  const recs = Object.values(A.recov).filter(x => x.roundId === r.id);
+  const sw = Object.values(A.swaps).filter(x => evIds.has(x.fromEventId) || evIds.has(x.toEventId));
+  const parts = [`il giro "${roundTitle(r)}"`, 'tutti i voti', evs.length ? `${evs.length} date pubblicate nel calendario` : null,
+    recs.length ? `${recs.length} "da recuperare"` : null, sw.length ? `${sw.length} richieste di scambio` : null].filter(Boolean);
+  if (!await confirmSheet('Eliminare tutto il giro?', `Verranno cancellati definitivamente: ${parts.join(', ')}.<br><br>Non si può annullare.`, 'Elimina tutto', true)) return;
   await busy(null, async () => {
-    const b = writeBatch(db);
-    b.delete(doc(db, 'rounds', r.id, 'private', 'config')); b.delete(doc(db, 'rounds', r.id, 'private', 'proposal'));
-    Object.keys(A.votes[r.id] || {}).forEach(id => b.delete(doc(db, 'rounds', r.id, 'votes', id)));
-    b.delete(doc(db, 'rounds', r.id)); await b.commit(); A.roundId = null;
+    const refs = [];
+    (await getDocs(collection(db, 'rounds', r.id, 'votes'))).forEach(d => refs.push(doc(db, 'rounds', r.id, 'votes', d.id)));
+    refs.push(doc(db, 'rounds', r.id, 'private', 'config'), doc(db, 'rounds', r.id, 'private', 'proposal'));
+    evs.forEach(e => refs.push(doc(db, 'events', e.id)));
+    recs.forEach(x => refs.push(doc(db, 'recoveries', x.id)));
+    sw.forEach(x => refs.push(doc(db, 'swaps', x.id)));
+    refs.push(doc(db, 'rounds', r.id)); // per ultimo il giro stesso
+    for (let i = 0; i < refs.length; i += 400) { const b = writeBatch(db); refs.slice(i, i + 400).forEach(x => b.delete(x)); await b.commit(); }
+    A.roundId = null;
   }, 'Giro eliminato');
 }
 

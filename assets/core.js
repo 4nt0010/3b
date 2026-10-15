@@ -3,7 +3,7 @@
 
 export const DOMAIN = '3b.app';
 export const APP_NAME = '3B Interrogazioni';
-export const VERSION = 6;
+export const VERSION = 7;
 
 // Palette pastello per le materie (testo scuro leggibile su tutte)
 export const PALETTE = [
