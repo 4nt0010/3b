@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential,
   EmailAuthProvider, collection, doc, onSnapshot, query, where, getDoc, setDoc, updateDoc, addDoc, serverTimestamp,
-} from './firebase.js';
-import * as C from './core.js';
+} from './firebase.js?v=6';
+import * as C from './core.js?v=6';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, rulesList, eventCard,
-} from './ui.js';
+} from './ui.js?v=6';
 
 const root = document.getElementById('app');
 const S = fresh();
@@ -99,7 +99,7 @@ function render() {
   if (S.ready.size < 4) return renderLoader(root);
   const badges = {
     vote: Object.values(S.rounds).filter(r => canVote(r) && !S.myVotes[r.id]?.first).length,
-    swap: Object.values(S.swapsIn).filter(s => s.status === 'pending_peer').length,
+    swap: Object.values(S.swapsIn).filter(s => s.status === 'pending_peer' && C.swappable(S.evA[s.fromEventId] || S.evB[s.fromEventId]) && C.swappable(S.evA[s.toEventId] || S.evB[s.toEventId])).length,
   };
   const y = window.scrollY;
   const main = shell(root, TABS, S.tab, t => { S.tab = t; window.scrollTo(0, 0); render(); }, badges);
@@ -194,12 +194,14 @@ function roundBlock(r) {
   const active = mine.find(e => !e.cancelled);
   const rec = Object.values(S.recov).find(x => x.roundId === r.id && x.status === 'open');
   let content;
-  if (active) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, 'La tua data'),
+  if (active && C.isDone(active)) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, 'Fatta ✓'),
+    h('h3', { style: { fontSize: '22px', marginTop: '2px' } }, C.cap(C.fmtLong(active.date))));
+  else if (active) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, 'La tua data'),
     h('h3', { style: { fontSize: '22px', marginTop: '2px' } }, C.cap(C.fmtLong(active.date))));
   else if (rec) content = h('div', { class: 'card danger' }, h('h3', {}, 'Da recuperare'), h('p', { class: 'small' }, 'L\'admin ti assegnerà una nuova data.'));
   else if (mine.length) content = h('div', { class: 'card warn' }, h('h3', {}, 'Giornata annullata'), h('p', { class: 'small' }, 'Sei in attesa di una nuova data.'));
   else content = h('div', { class: 'card' }, h('p', { class: 'muted small' }, 'Non hai una data in questo giro.'));
-  return h('section', { class: 'round' }, head(h('span', { class: 'pill ok' }, 'Pubblicato')), content);
+  return h('section', { class: 'round' }, head(active && C.isDone(active) ? h('span', { class: 'pill ok' }, 'Fatta') : h('span', { class: 'pill ok' }, 'Pubblicato')), content);
 }
 function dateSheet(r, d, rs, past) {
   const v = S.myVotes[r.id] || {};
@@ -231,7 +233,7 @@ const swapStatus = { pending_peer: ['In attesa del compagno', 'grey'], pending_a
 function renderSwap(main) {
   const today = C.todayISO();
   const incoming = Object.values(S.swapsIn).filter(s => s.status === 'pending_peer');
-  const myEv = events().filter(e => e.type === 'interrogazione' && !e.cancelled && e.date >= today && (e.studentIds || []).includes(S.uid)).sort((a, b) => a.date.localeCompare(b.date));
+  const myEv = events().filter(e => C.swappable(e) && (e.studentIds || []).includes(S.uid)).sort((a, b) => a.date.localeCompare(b.date));
   const history = [...Object.values(S.swapsOut), ...Object.values(S.swapsIn).filter(s => s.status !== 'pending_peer')]
     .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)).slice(0, 12);
   page(main, [h('h1', {}, 'Scambi'), h('p', { class: 'sub' }, 'Scambia la tua data con un compagno, nella stessa materia.')], [
@@ -240,19 +242,21 @@ function renderSwap(main) {
     myEv.length ? myEv.map(e => h('div', { class: 'card', style: { background: subjColor(S.subjects, e.subjectId) } },
       h('div', { class: 'row' }, h('div', { class: 'grow' }, h('h3', {}, subjName(S.subjects, e.subjectId)), h('div', { class: 'small', style: { opacity: .7, fontWeight: '600' } }, C.cap(C.fmtLong(e.date)))),
         h('button', { class: 'btn sm', onclick: () => proposeSheet(e) }, 'Proponi scambio'))))
-      : h('div', { class: 'empty' }, h('b', {}, 'Nessuna interrogazione in programma'), 'Gli scambi si fanno sulle date già pubblicate.'),
+      : h('div', { class: 'empty' }, h('b', {}, 'Nessuna interrogazione da scambiare'), 'Gli scambi si fanno sulle date già pubblicate, prima del giorno dell\'interrogazione.'),
     history.length ? [h('div', { class: 'section-title' }, 'Storico'), history.map(historyCard)] : null,
   ]);
 }
 function incomingCard(s) {
   const other = S.students[s.fromUid];
   const rs = reasons(s.fromDate, [s.toEventId]);
+  const expired = !C.swappable(S.evA[s.fromEventId] || S.evB[s.fromEventId]) || !C.swappable(S.evA[s.toEventId] || S.evB[s.toEventId]);
   return h('div', { class: 'card white' },
     h('div', { class: 'row' }, avatar(other), h('div', { class: 'grow' }, h('b', {}, C.fullName(other)), h('div', { class: 'small muted' }, subjName(S.subjects, s.subjectId)))),
     h('p', { style: { marginTop: '10px' } }, 'Tu passeresti da ', h('b', {}, C.fmtShort(s.toDate)), ' a ', h('b', {}, C.fmtShort(s.fromDate)), '.'),
-    rs.length ? h('div', { class: 'card danger', style: { marginTop: '10px' } }, h('b', { class: 'small' }, 'Attenzione: '), rs.map(x => h('div', { class: 'small' }, C.reasonText(x, S.subjects)))) : null,
+    rs.length && !expired ? h('div', { class: 'card danger', style: { marginTop: '10px' } }, h('b', { class: 'small' }, 'Attenzione: '), rs.map(x => h('div', { class: 'small' }, C.reasonText(x, S.subjects)))) : null,
+    expired ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, h('b', { class: 'small' }, 'Scaduta: '), h('span', { class: 'small' }, 'una delle due interrogazioni è già stata fatta o è cambiata.')) : null,
     h('div', { class: 'row', style: { marginTop: '12px' } },
-      h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'pending_admin', updatedAt: serverTimestamp() }), 'Accettato: ora decide l\'admin') }, 'Accetta'),
+      expired ? null : h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'pending_admin', updatedAt: serverTimestamp() }), 'Accettato: ora decide l\'admin') }, 'Accetta'),
       h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'declined', updatedAt: serverTimestamp() }), 'Richiesta rifiutata') }, 'Rifiuta')));
 }
 function historyCard(s) {
@@ -269,7 +273,7 @@ function proposeSheet(myEvent) {
   const today = C.todayISO();
   const pending = new Set(Object.values(S.swapsOut).filter(s => ['pending_peer', 'pending_admin'].includes(s.status)).map(s => s.toUid + s.toEventId));
   const cands = events().filter(e => e.type === 'interrogazione' && !e.cancelled && e.subjectId === myEvent.subjectId && e.id !== myEvent.id
-    && e.date !== myEvent.date && e.date >= today && !(e.studentIds || []).includes(S.uid)).sort((a, b) => a.date.localeCompare(b.date));
+    && e.date !== myEvent.date && C.swappable(e) && !(e.studentIds || []).includes(S.uid)).sort((a, b) => a.date.localeCompare(b.date));
   openSheet('Proponi uno scambio', close => [
     h('p', { class: 'muted' }, 'La tua data: ', h('b', {}, C.fmtLong(myEvent.date)), '. Scegli il compagno con cui scambiare.'),
     cands.length ? cands.map(e => [
@@ -316,6 +320,14 @@ function renderMe(main) {
   ], [
     recs.length ? [h('div', { class: 'section-title' }, 'Da recuperare'), recs.map(r => h('div', { class: 'card danger' }, h('b', {}, subjName(S.subjects, r.subjectId)),
       h('div', { class: 'small' }, `Data originale: ${C.fmtShort(r.fromDate)} · in attesa di una nuova data`)))] : null,
+    (() => {
+      const done = events().filter(e => e.type === 'interrogazione' && C.isDone(e) && (e.studentIds || []).includes(S.uid)).sort((a, b) => b.date.localeCompare(a.date));
+      return [h('div', { class: 'section-title' }, `Archivio interrogazioni (${done.length})`),
+        done.length ? done.map(e => h('div', { class: 'list-item' }, h('span', { class: 'sdot', style: { '--c': subjColor(S.subjects, e.subjectId) } }),
+          h('div', { class: 'grow' }, h('div', { class: 't' }, subjName(S.subjects, e.subjectId)), h('div', { class: 's' }, C.cap(C.fmtLong(e.date)))),
+          h('span', { class: 'pill ok' }, icon('check'), 'Fatta')))
+          : h('p', { class: 'small muted' }, 'Le interrogazioni fatte compariranno qui dal giorno stesso.')];
+    })(),
     h('div', { class: 'section-title' }, 'Cambia password'),
     h('form', { class: 'card', onsubmit: async e => {
       e.preventDefault(); const btn = e.currentTarget.querySelector('button');
@@ -334,5 +346,6 @@ function renderMe(main) {
     h('button', { class: 'btn block', type: 'submit' }, 'Salva password')),
     h('div', { class: 'spacer' }),
     h('button', { class: 'btn block line', onclick: async () => { if (await confirmSheet('Vuoi uscire?', 'Dovrai inserire di nuovo nome utente e password.', 'Esci')) signOut(auth); } }, icon('logout'), 'Esci'),
+    h('p', { class: 'small muted', style: { textAlign: 'center', marginTop: '24px' } }, `Versione ${C.VERSION}`),
   ]);
 }

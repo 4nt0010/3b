@@ -3,6 +3,7 @@
 
 export const DOMAIN = '3b.app';
 export const APP_NAME = '3B Interrogazioni';
+export const VERSION = 6;
 
 // Palette pastello per le materie (testo scuro leggibile su tutte)
 export const PALETTE = [
@@ -34,6 +35,9 @@ export function dayDiff(a, b) {
   return Math.round((Date.UTC(y1, m1 - 1, d1) - Date.UTC(y2, m2 - 1, d2)) / 864e5);
 }
 export const todayISO = () => toISO(new Date());
+// Dal giorno stesso dell'interrogazione in poi è considerata fatta (va in archivio, niente più scambi)
+export const isDone = ev => !!ev && !ev.cancelled && ev.date <= todayISO();
+export const swappable = ev => !!ev && ev.type === 'interrogazione' && !ev.cancelled && ev.date > todayISO();
 export const isWeekend = s => { const w = fromISO(s).getDay(); return w === 0 || w === 6; };
 export function mondayOf(s) { const d = fromISO(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return toISO(d); }
 export function nextWeekday(s) { let d = s; while (isWeekend(d)) d = addDays(d, 1); return d; }
@@ -183,7 +187,8 @@ export const RULES = [
   { t: 'Chi non vota', b: `<p>Chi non vota viene assegnato d'ufficio a un giorno rimasto libero.</p>` },
   { t: 'Cosa vedono gli altri', b: `<p>Tutti vedono le date pubblicate di tutti nel calendario.</p><p>Le scelte di voto restano private finché l'admin non decide di renderle visibili. Le verifiche le vede solo chi le deve fare.</p>` },
   { t: 'Giornata annullata', b: `<p>Se il docente salta un giorno (sciopero, gita, assenza), l'admin annulla la giornata. Gli interrogati di quel giorno vengono spostati in un altro giorno libero oppure rivotano tra le date rimaste.</p>` },
-  { t: 'Scambi', b: `<p>Puoi proporre a un compagno di scambiarvi la data, nella stessa materia. Lo scambio avviene solo se lui accetta <b>e</b> l'admin approva.</p>` },
+  { t: 'Scambi', b: `<p>Puoi proporre a un compagno di scambiarvi la data, nella stessa materia. Lo scambio avviene solo se lui accetta <b>e</b> l'admin approva, e solo prima del giorno dell'interrogazione.</p>` },
+  { t: 'Interrogazioni fatte', b: `<p>Dal giorno dell'interrogazione in poi, l'interrogazione risulta <b>fatta</b>: nel calendario compare come "Fatta" e finisce nell'archivio del tuo Profilo.</p><p>Da quel giorno non si può più scambiare.</p>` },
   { t: 'Da recuperare', b: `<p>Solo in casi gravi (per esempio un'assenza il giorno dell'interrogazione) l'admin può segnarti come "da recuperare" e assegnarti una nuova data.</p>` },
   { t: 'Il tuo account', b: `<p>L'account è personale: non prestarlo e non entrare in quello di altri. Puoi cambiare la password dal Profilo.</p><p>Se dimentichi una password cambiata, l'admin dovrà ricreare l'account.</p>` },
 ];

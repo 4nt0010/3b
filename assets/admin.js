@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
   collection, doc, onSnapshot, getDoc, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
-} from './firebase.js';
-import * as C from './core.js';
+} from './firebase.js?v=6';
+import * as C from './core.js?v=6';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, toggleRow,
-} from './ui.js';
+} from './ui.js?v=6';
 
 const root = document.getElementById('app');
 const A = fresh();
@@ -120,9 +120,10 @@ function renderRounds(main) {
     list.length ? list.map(r => {
       const rn = roundStudents(r).length; const voted = roundStudents(r).filter(id => A.votes[r.id]?.[id]?.first).length;
       const sPill = { draft: 'grey', voting: 'lime', closed: 'violet', published: 'ok', archived: 'grey' }[r.status];
+      const completed = r.status === 'published' && (r.dates || []).length && (r.dates || []).every(d => d <= C.todayISO());
       return h('button', { class: 'card', style: { display: 'block', width: '100%', textAlign: 'left' }, onclick: () => { A.roundId = r.id; window.scrollTo(0, 0); render(); } },
         h('div', { class: 'row' }, h('span', { class: 'sdot', style: { '--c': subjColor(A.subjects, r.subjectId) } }), h('h3', { class: 'grow' }, roundTitle(r)),
-          h('span', { class: 'pill ' + sPill }, C.STATUS[r.status])),
+          h('span', { class: 'pill ' + sPill }, completed ? 'Completato' : C.STATUS[r.status])),
         h('div', { class: 'small muted', style: { marginTop: '6px' } },
           `${(r.dates || []).length} date`, r.dates?.length ? ` · dal ${C.fmtShort([...r.dates].sort()[0])}` : '',
           ` · ${rn} studenti`, r.status === 'voting' ? ` · ${voted}/${rn} hanno votato` : '', A.proposals[r.id] ? ' · proposta da confermare' : '',
@@ -141,55 +142,76 @@ function roundSheet(r = null) {
   const capIn = h('input', { type: 'number', min: '1', inputmode: 'numeric', value: String(cfg.defaultCap ?? 4) });
   const dateIn = h('input', { type: 'date', min: C.todayISO() });
   const part = new Set(r && Array.isArray(r.participants) ? r.participants : studentIds());
+  const def = () => Math.max(1, parseInt(capIn.value, 10) || 1);
+  // posti per ogni data: partono dal valore predefinito e si cambiano una per una
+  const caps = {}; dates.forEach(d => (caps[d] = cfg.caps?.[d] ?? cfg.defaultCap ?? 4));
   let showPart = false, summaryEl = null;
   openSheet(r ? 'Modifica giro' : 'Nuovo giro', (close, refill) => {
     const ids = studentIds(); const allIn = ids.every(id => part.has(id));
     const summaryText = () => {
-      const capN = Math.max(1, parseInt(capIn.value, 10) || 1); const need = Math.ceil(part.size / capN);
-      return dates.length ? `${dates.length} date × ${capN} posti = ${dates.length * capN} posti per ${part.size} studenti` + (dates.length * capN < part.size ? ` · servono almeno ${need} date` : '')
-        : `Con ${capN} posti al giorno servono almeno ${need} date`;
+      const tot = dates.reduce((a, d) => a + (caps[d] ?? def()), 0);
+      if (!dates.length) return `${part.size} studenti nel giro: aggiungi le date e scegli quanti posti ha ciascuna.`;
+      return `${dates.length} date · ${tot} posti totali per ${part.size} studenti` + (tot < part.size ? ` · mancano ${part.size - tot} posti` : '');
     };
+    const upd = () => { if (summaryEl) { summaryEl.textContent = summaryText(); summaryEl.style.color = dates.length && dates.reduce((a, d) => a + caps[d], 0) < part.size ? 'var(--danger)' : ''; } };
+    const stepper = d => {
+      const val = h('b', { style: { minWidth: '28px', textAlign: 'center', fontSize: '18px' } }, String(caps[d]));
+      const set = n => { caps[d] = Math.max(1, Math.min(40, n)); val.textContent = String(caps[d]); upd(); };
+      return h('div', { class: 'row', style: { gap: '6px' } },
+        h('button', { class: 'iconbtn', style: { background: 'var(--surface-2)', width: '36px', height: '36px', fontSize: '20px', fontWeight: '800' }, 'aria-label': 'Meno', onclick: () => set(caps[d] - 1) }, '−'),
+        val,
+        h('button', { class: 'iconbtn', style: { background: 'var(--surface-2)', width: '36px', height: '36px', fontSize: '20px', fontWeight: '800' }, 'aria-label': 'Più', onclick: () => set(caps[d] + 1) }, '+'));
+    };
+    const dateRows = dates.length ? h('div', { style: { marginTop: '8px' } }, dates.map(d => h('div', { class: 'list-item', style: { padding: '8px 2px' } },
+      h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtShort(d))), h('div', { class: 's' }, 'posti')),
+      stepper(d),
+      h('button', { class: 'iconbtn', style: { background: 'var(--danger-soft)', color: 'var(--danger)', width: '36px', height: '36px', marginLeft: '4px' }, 'aria-label': 'Rimuovi data', onclick: () => { dates = dates.filter(x => x !== d); delete caps[d]; refill(); } }, icon('close')))))
+      : h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Nessuna data aggiunta');
+    const add = () => {
+      const d = dateIn.value; if (!d) return;
+      if (C.isWeekend(d)) return toast('Sabato e domenica non si va a scuola', 'error');
+      if (!dates.includes(d)) { dates = [...dates, d].sort(); caps[d] = def(); }
+      dateIn.value = ''; refill();
+    };
+    capIn.oninput = upd;
     const partBlock = h('div', { class: 'field' },
       h('div', { class: 'row', style: { justifyContent: 'space-between' } },
         h('span', { class: 'small', style: { fontWeight: '700', color: 'var(--muted)' } }, `Chi partecipa: ${part.size} su ${ids.length}`),
         h('button', { class: 'btn sm ghost', onclick: () => { showPart = !showPart; refill(); } }, showPart ? 'Chiudi elenco' : 'Scegli')),
-      summaryEl = h('p', { class: 'small muted', style: { marginTop: '4px' } }, summaryText()),
       showPart ? h('div', { style: { marginTop: '8px' } },
         h('button', { class: 'btn sm line', onclick: () => { allIn ? part.clear() : ids.forEach(id => part.add(id)); refill(); } }, allIn ? 'Togli tutti' : 'Tutta la classe'),
         ids.map(id => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: part.has(id), onchange: e => { e.target.checked ? part.add(id) : part.delete(id); refill(); } }),
           h('div', { class: 'grow' }, C.fullName(st(id)))))) : null);
-    capIn.oninput = () => { if (summaryEl) summaryEl.textContent = summaryText(); };
-    const chips = h('div', { class: 'chips', style: { marginTop: '10px' } }, dates.length ? dates.map(d => h('span', { class: 'chip' }, C.fmtShort(d),
-      h('button', { 'aria-label': 'Rimuovi', onclick: () => { dates = dates.filter(x => x !== d); refill(); } }, icon('close')))) : h('span', { class: 'small muted' }, 'Nessuna data aggiunta'));
-    const add = () => {
-      const d = dateIn.value; if (!d) return;
-      if (C.isWeekend(d)) return toast('Sabato e domenica non si va a scuola', 'error');
-      if (!dates.includes(d)) dates = [...dates, d].sort();
-      dateIn.value = ''; refill();
-    };
-    return [
+    const out = [
       h('label', { class: 'field' }, h('span', {}, 'Materia'), subj),
       h('label', { class: 'field' }, h('span', {}, 'Titolo'), title),
-      h('label', { class: 'field' }, h('span', {}, 'Posti massimi per giorno (nascosto alla classe)'), capIn),
-      h('div', { class: 'field' }, h('span', { class: 'small', style: { fontWeight: '700', color: 'var(--muted)' } }, 'Giorni in cui viene il docente'),
-        h('div', { class: 'row', style: { marginTop: '6px' } }, h('div', { class: 'grow' }, dateIn), h('button', { class: 'btn ghost', onclick: add }, icon('plus'), 'Aggiungi')), chips),
       partBlock,
+      h('div', { class: 'field' }, h('span', { class: 'small', style: { fontWeight: '700', color: 'var(--muted)' } }, 'Giorni in cui viene il docente e quanti può interrogarne'),
+        h('div', { class: 'row', style: { marginTop: '6px', alignItems: 'flex-end' } },
+          h('div', { class: 'grow' }, dateIn),
+          h('label', { style: { width: '92px' } }, h('span', { class: 'small muted', style: { display: 'block', marginBottom: '4px', fontWeight: '700' } }, 'Posti'), capIn),
+          h('button', { class: 'btn ghost', onclick: add }, icon('plus'), 'Aggiungi')),
+        h('p', { class: 'small muted', style: { marginTop: '6px' } }, 'Ogni data parte con i posti indicati qui sopra; poi puoi cambiarli una per una con − e +. La classe non vede mai questi numeri.'),
+        dateRows),
+      summaryEl = h('div', { class: 'card', style: { fontWeight: '700', fontSize: '14px' } }, ''),
       h('div', { class: 'actions' },
         h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
           if (!dates.length) throw new Error('Aggiungi almeno una data');
           if (!part.size) throw new Error('Scegli almeno uno studente');
-          const capN = Math.max(1, parseInt(capIn.value, 10) || 1);
           const data = { subjectId: subj.value, title: title.value.trim(), dates, participants: [...part] };
+          const conf = { defaultCap: def(), caps: Object.fromEntries(dates.map(d => [d, caps[d] ?? def()])) };
           if (r) {
             await updateDoc(doc(db, 'rounds', r.id), data);
-            await setDoc(doc(db, 'rounds', r.id, 'private', 'config'), { defaultCap: capN }, { merge: true });
+            await setDoc(doc(db, 'rounds', r.id, 'private', 'config'), conf);
           } else {
             const ref = await addDoc(collection(db, 'rounds'), { ...data, status: 'draft', visible: false, showVotes: false, createdAt: serverTimestamp() });
-            await setDoc(doc(db, 'rounds', ref.id, 'private', 'config'), { defaultCap: capN, caps: {} });
+            await setDoc(doc(db, 'rounds', ref.id, 'private', 'config'), conf);
             A.roundId = ref.id;
           }
         }, r ? 'Giro aggiornato' : 'Giro creato').then(close).catch(() => {}) }, r ? 'Salva modifiche' : 'Crea giro')),
     ];
+    upd();
+    return out;
   });
 }
 
@@ -244,7 +266,7 @@ function renderRound(main, r) {
   // tabella date
   const pubCount = d => roundEvents(r).filter(e => e.date === d && !e.cancelled).reduce((s, e) => s + (e.studentIds || []).length, 0);
   const isCancelled = d => roundEvents(r).some(e => e.date === d && e.cancelled) && !roundEvents(r).some(e => e.date === d && !e.cancelled);
-  body.push(h('div', { class: 'section-title' }, 'Date e posti'),
+  body.push(h('div', { class: 'section-title' }, 'Date e posti (modificabili)'),
     h('table', { class: 'table' }, h('thead', {}, h('tr', {}, h('th', {}, 'Data'), h('th', {}, 'Posti'),
       ['voting', 'closed'].includes(r.status) ? [h('th', {}, '1ª'), h('th', {}, 'Ris.')] : r.status !== 'draft' ? h('th', {}, 'Assegnati') : null)),
     h('tbody', {}, sorted.map(d => {
@@ -281,8 +303,9 @@ function renderRound(main, r) {
       const evs = roundEvents(r).filter(e => e.date === d);
       if (!evs.length) { body.push(h('div', { class: 'pday' }, h('div', { class: 'pday-h' }, C.cap(C.fmtLong(d)), h('span', { class: 'muted small' }, 'nessuno')))); continue; }
       for (const ev of evs) body.push(h('div', { class: 'pday', style: ev.cancelled ? { opacity: '.6' } : null },
-        h('div', { class: 'pday-h' }, h('span', {}, C.cap(C.fmtLong(d)), ev.cancelled ? h('span', { class: 'pill danger', style: { marginLeft: '8px' } }, 'Annullata') : null),
-          !ev.cancelled ? h('button', { class: 'btn sm danger-ghost', onclick: () => cancelDaySheet(r, ev) }, 'Annulla giornata') : null),
+        h('div', { class: 'pday-h' }, h('span', {}, C.cap(C.fmtLong(d)), ev.cancelled ? h('span', { class: 'pill danger', style: { marginLeft: '8px' } }, 'Annullata')
+            : C.isDone(ev) ? h('span', { class: 'pill ok', style: { marginLeft: '8px' } }, icon('check'), 'Fatta') : null),
+          !ev.cancelled && ev.date >= C.todayISO() ? h('button', { class: 'btn sm danger-ghost', onclick: () => cancelDaySheet(r, ev) }, 'Annulla giornata') : null),
         h('div', { class: 'chips' }, sortIds(ev.studentIds || []).map(id => h('button', { class: 'chip', onclick: ev.cancelled ? null : () => assignedStudentSheet(ev, id) }, C.fullName(st(id)))))));
     }
     const recs = Object.values(A.recov).filter(x => x.roundId === r.id && x.status === 'open');
@@ -491,7 +514,7 @@ function adminEventSheet(ev) {
     ev.type === 'verifica' ? h('p', { class: 'small' }, sortIds(ev.studentIds || []).map(id => C.fullName(st(id))).join(', ') || 'Nessuno')
       : h('div', { class: 'chips' }, sortIds(ev.studentIds || []).map(id => h('button', { class: 'chip', onclick: ev.cancelled ? null : () => { close(); assignedStudentSheet(ev, id); } }, C.fullName(st(id))))),
     h('div', { class: 'actions' },
-      r && !ev.cancelled ? h('button', { class: 'btn block danger-ghost', onclick: () => { close(); cancelDaySheet(r, ev); } }, 'Annulla giornata') : null,
+      r && !ev.cancelled && ev.date >= C.todayISO() ? h('button', { class: 'btn block danger-ghost', onclick: () => { close(); cancelDaySheet(r, ev); } }, 'Annulla giornata') : null,
       r ? h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'giri'; A.roundId = r.id; render(); } }, 'Apri il giro') : null,
       !r || ev.cancelled ? h('button', { class: 'btn block danger', onclick: async () => { if (await confirmSheet('Eliminare l\'evento?', 'Sparirà dal calendario di tutti.', 'Elimina', true)) { await busy(null, () => deleteDoc(doc(db, 'events', ev.id)), 'Evento eliminato'); close(); } } }, icon('trash'), 'Elimina evento') : null),
   ]);
@@ -541,7 +564,7 @@ function renderStudents(main) {
     ids.length ? ids.map(id => {
       const s = st(id); const ex = Object.keys(A.excl[id]?.dates || {}).filter(d => d >= C.todayISO()).length; const wk = Object.keys(A.excl[id]?.weekdays || {}).map(w => C.WEEKDAYS.find(x => x[0] === w)?.[1].slice(0, 3).toLowerCase()).filter(Boolean);
       return h('button', { class: 'list-item', onclick: () => studentSheet(id) }, h('span', { class: 'av' }, C.initials(s)),
-        h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(s)), h('div', { class: 's' }, s.username, wk.length ? ` · mai di ${wk.join(', ')}` : '', ex ? ` · ${ex} giorni esclusi` : '', s.rulesAccepted ? '' : ' · regole non lette')),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(s)), h('div', { class: 's' }, s.username, wk.length ? ` · mai di ${wk.join(', ')}` : '', ex ? ` · ${ex} ${ex === 1 ? 'giorno escluso' : 'giorni esclusi'}` : '', s.rulesAccepted ? '' : ' · regole non lette')),
         icon('right', 'chev'));
     }) : h('div', { class: 'empty' }, h('b', {}, 'Nessuno studente'), 'Aggiungi la classe con il pulsante +.'),
   ]);
@@ -675,7 +698,8 @@ function renderRequests(main) {
 }
 function swapCard(s) {
   const evA = A.events[s.fromEventId], evB = A.events[s.toEventId];
-  const valid = evA && evB && !evA.cancelled && !evB.cancelled && (evA.studentIds || []).includes(s.fromUid) && (evB.studentIds || []).includes(s.toUid);
+  const expired = !C.swappable(evA) || !C.swappable(evB);
+  const valid = !expired && (evA.studentIds || []).includes(s.fromUid) && (evB.studentIds || []).includes(s.toUid);
   const rA = reasonLine(s.fromUid, s.toDate, [s.fromEventId]), rB = reasonLine(s.toUid, s.fromDate, [s.toEventId]);
   return h('div', { class: 'card white' },
     h('div', { class: 'small muted', style: { fontWeight: '700' } }, subjName(A.subjects, s.subjectId)),
@@ -683,7 +707,7 @@ function swapCard(s) {
     rA ? h('div', { class: 'small', style: { color: 'var(--danger)' } }, rA) : null,
     h('p', { style: { marginTop: '4px' } }, h('b', {}, C.fullName(st(s.toUid))), ` passa da ${C.fmtShort(s.toDate)} a ${C.fmtShort(s.fromDate)}`),
     rB ? h('div', { class: 'small', style: { color: 'var(--danger)' } }, rB) : null,
-    !valid ? h('div', { class: 'card danger', style: { marginTop: '8px' } }, 'Le date sono cambiate dopo la richiesta: non è più applicabile.') : null,
+    !valid ? h('div', { class: 'card danger', style: { marginTop: '8px' } }, expired ? 'Non più applicabile: una delle due interrogazioni è già stata fatta o annullata.' : 'Le date sono cambiate dopo la richiesta: non è più applicabile.') : null,
     h('div', { class: 'row', style: { marginTop: '12px' } },
       valid ? h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, async () => {
         const b = writeBatch(db);
@@ -741,6 +765,7 @@ function renderMore(main) {
     h('div', { class: 'section-title' }, 'Sito'),
     h('a', { class: 'list-item', href: '../', target: '_blank', style: { color: 'inherit', textDecoration: 'none' } }, icon('ext'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Apri il sito studenti'))),
     h('button', { class: 'list-item', onclick: async () => { if (await confirmSheet('Uscire?', 'Dovrai rientrare con le credenziali admin.', 'Esci')) signOut(auth); } }, icon('logout'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Esci'))),
+    h('p', { class: 'small muted', style: { textAlign: 'center', marginTop: '24px' } }, `Versione ${C.VERSION}`),
   ]);
 }
 function subjectSheet(s = null) {

@@ -101,7 +101,7 @@ h1, h2, h3, p { margin: 0; }
   .nav button { flex: 0 0 60px; border-radius: 18px; font-size: 10px; }
   .hero { padding: 26px 26px 18px; }
   .body { padding: 24px 22px; margin: 0 12px 12px; }
-  .body-inner, .hero-inner { max-width: 860px; margin: 0 auto; }
+  .body-inner, .hero-inner { max-width: 1200px; margin: 0 auto; }
 }
 
 /* ---------- Buttons ---------- */
@@ -378,3 +378,7 @@ svg.chev { width: 18px; height: 18px; flex: 0 0 auto; }
 .list-item > svg { width: 20px; height: 20px; flex: 0 0 auto; }
 details.acc summary svg { width: 18px; height: 18px; }
 .card.white .av { background: var(--surface-2); box-shadow: none; }
+
+.ev.done { opacity: .72; }
+.ev.done.mine { box-shadow: inset 0 0 0 2px rgba(17,17,17,.45); }
+.pill svg { width: 12px; height: 12px; }

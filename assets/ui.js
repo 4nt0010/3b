@@ -1,4 +1,4 @@
-import * as C from './core.js';
+import * as C from './core.js?v=6';
 
 /* ---------- DOM helper ---------- */
 export function h(tag, attrs = {}, ...kids) {
@@ -166,9 +166,10 @@ export function eventCard(ev, { students, subjects, me, totalStudents, onClick, 
   const color = subjColor(subjects, ev.subjectId);
   const isVer = ev.type === 'verifica';
   const whole = isVer && totalStudents && ids.length >= totalStudents;
+  const done = C.isDone(ev);
   const typeLabel = ev.cancelled ? 'Giornata annullata' : isVer ? 'Verifica in classe' : 'Interrogazione';
-  return h('button', { class: 'ev' + (mine ? ' mine' : '') + (ev.cancelled ? ' cancelled' : ''), style: { '--c': color }, onclick: onClick ? () => onClick(ev) : null },
-    h('div', { class: 'ev-top' }, h('span', { class: 'ev-type' }, typeLabel), mine ? h('span', { class: 'pill lime' }, 'Tu') : null),
+  return h('button', { class: 'ev' + (mine ? ' mine' : '') + (ev.cancelled ? ' cancelled' : '') + (done ? ' done' : ''), style: { '--c': color }, onclick: onClick ? () => onClick(ev) : null },
+    h('div', { class: 'ev-top' }, h('span', { class: 'ev-type' }, typeLabel), done ? h('span', { class: 'pill ok' }, icon('check'), isVer ? 'Svolta' : 'Fatta') : null, mine ? h('span', { class: 'pill lime' }, 'Tu') : null),
     h('h3', {}, subjName(subjects, ev.subjectId)),
     ev.note ? h('div', { class: 'note' }, ev.note) : null,
     whole ? h('div', { class: 'names' }, 'Tutta la classe') :
