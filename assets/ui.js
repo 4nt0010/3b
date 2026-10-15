@@ -1,4 +1,4 @@
-import * as C from './core.js?v=7';
+import * as C from './core.js?v=8';
 
 /* ---------- DOM helper ---------- */
 export function h(tag, attrs = {}, ...kids) {

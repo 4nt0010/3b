@@ -3,7 +3,7 @@
 
 export const DOMAIN = '3b.app';
 export const APP_NAME = '3B Interrogazioni';
-export const VERSION = 7;
+export const VERSION = 8;
 
 // Palette pastello per le materie (testo scuro leggibile su tutte)
 export const PALETTE = [
@@ -14,6 +14,7 @@ export const PALETTE = [
 export const STATUS = {
   draft: 'Bozza',
   voting: 'Votazione aperta',
+  paused: 'Votazione in pausa',
   closed: 'Votazione chiusa',
   published: 'Pubblicato',
   archived: 'Archiviato',
@@ -87,7 +88,15 @@ export const byLastName = (a, b) => (a.last + a.first).localeCompare(b.last + b.
    lo stesso giorno o nel giorno di calendario prima/dopo, oppure se l'admin
    gli ha escluso quella data. Le verifiche non bloccano. */
 // exclusions = { dates: { 'YYYY-MM-DD': nota }, weekdays: { '1': nota } }  (1 = lunedì … 5 = venerdì)
-export function blockReasons(uid, date, { events = [], exclusions = {}, ignore = [] } = {}) {
+// unlock: date sbloccate dall'admin per questo studente in un giro (['all'] = tutte).
+// Lo sblocco toglie solo i blocchi dovuti ad altre interrogazioni, mai le esclusioni.
+export function blockReasons(uid, date, { events = [], exclusions = {}, ignore = [], unlock = null } = {}) {
+  const raw = rawReasons(uid, date, { events, exclusions, ignore });
+  if (unlock && (unlock.includes('all') || unlock.includes(date))) return raw.filter(x => x.kind !== 'event');
+  return raw;
+}
+export const isUnlocked = (unlock, date) => !!unlock && (unlock.includes('all') || unlock.includes(date));
+function rawReasons(uid, date, { events = [], exclusions = {}, ignore = [] } = {}) {
   const out = [];
   const dates = exclusions?.dates || {}, weekly = exclusions?.weekdays || {};
   if (Object.prototype.hasOwnProperty.call(dates, date)) out.push({ kind: 'excl', date, note: dates[date] || '' });
@@ -181,8 +190,8 @@ export const HOW_LABEL = { first: '1ª scelta', reserve: 'Riserva', random: 'Sor
 /* ---------- Regole (pagina Info) ---------- */
 export const RULES = [
   { t: 'Come funziona un giro', b: `<p>Per ogni materia l'admin crea un <b>giro di interrogazioni</b> con i giorni in cui viene il docente.</p><ol><li>L'admin apre la votazione.</li><li>Ognuno sceglie la data che preferisce.</li><li>L'admin chiude la votazione e pubblica le date definitive.</li></ol><p>Le date pubblicate compaiono nel calendario di tutti.</p>` },
-  { t: 'Come si vota', b: `<p>Puoi indicare una <b>prima scelta</b> e una <b>riserva</b>. La riserva non è obbligatoria, ma ti conviene metterla: se la prima scelta è piena, passi lì invece che in un giorno a caso.</p><p>Non c'è una scadenza: puoi cambiare le tue scelte finché l'admin non chiude la votazione.</p>` },
-  { t: 'Date bloccate', b: `<p>Non puoi scegliere un giorno in cui hai già un'interrogazione, né il giorno prima o il giorno dopo.</p><p>Il weekend fa da pausa: se sei interrogato il <b>venerdì</b> puoi esserlo anche il <b>lunedì</b>.</p><p>Le verifiche in classe <b>non</b> bloccano nessuna data. Sotto ogni data bloccata trovi scritto il motivo.</p><p>L'admin può escludere per te singole date (assenze, motivi personali) oppure un giorno fisso della settimana (per esempio ogni lunedì per gli studenti atleti): le vedi bloccate solo tu.</p>` },
+  { t: 'Come si vota', b: `<p>Puoi indicare una <b>prima scelta</b> e una <b>riserva</b>. La riserva non è obbligatoria, ma ti conviene metterla: se la prima scelta è piena, passi lì invece che in un giorno a caso.</p><p>Non c'è una scadenza: puoi cambiare le tue scelte finché l'admin non chiude la votazione. L'admin può anche metterla in pausa o azzerare i voti se serve ripartire.</p>` },
+  { t: 'Date bloccate', b: `<p>Non puoi scegliere un giorno in cui hai già un'interrogazione, né il giorno prima o il giorno dopo.</p><p>Il weekend fa da pausa: se sei interrogato il <b>venerdì</b> puoi esserlo anche il <b>lunedì</b>.</p><p>Le verifiche in classe <b>non</b> bloccano nessuna data. Sotto ogni data bloccata trovi scritto il motivo.</p><p>Se vuoi comunque stare in un giorno vicino a un'altra tua interrogazione, chiedilo all'admin: può sbloccarti quella data solo per quel giro.</p><p>L'admin può escludere per te singole date (assenze, motivi personali) oppure un giorno fisso della settimana (per esempio ogni lunedì per gli studenti atleti): le vedi bloccate solo tu.</p>` },
   { t: 'Posti limitati e sorteggio', b: `<p>Ogni giorno ha un numero massimo di posti, che non viene mostrato. Durante la votazione non si vede nemmeno quanti hanno scelto una data.</p><p>Se troppi scelgono la stessa data, si sorteggia tra chi l'ha votata. Chi resta fuori passa alla sua riserva; se anche quella è piena, viene messo in un giorno libero, sempre rispettando le sue date bloccate.</p><p>In alternativa l'admin può sistemare le date a mano mettendo d'accordo la classe.</p>` },
   { t: 'Chi non vota', b: `<p>Chi non vota viene assegnato d'ufficio a un giorno rimasto libero.</p>` },
   { t: 'Cosa vedono gli altri', b: `<p>Tutti vedono le date pubblicate di tutti nel calendario.</p><p>Le scelte di voto restano private finché l'admin non decide di renderle visibili. Le verifiche le vede solo chi le deve fare.</p>` },

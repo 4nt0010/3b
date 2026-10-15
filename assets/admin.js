@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
   collection, doc, onSnapshot, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
-} from './firebase.js?v=7';
-import * as C from './core.js?v=7';
+} from './firebase.js?v=8';
+import * as C from './core.js?v=8';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, toggleRow,
-} from './ui.js?v=7';
+} from './ui.js?v=8';
 
 const root = document.getElementById('app');
 const A = fresh();
@@ -77,8 +77,8 @@ const events = () => Object.values(A.events);
 const studentIds = () => Object.keys(A.students).sort((a, b) => C.byLastName(A.students[a], A.students[b]));
 const st = id => A.students[id];
 const capOf = (rid, d) => { const c = A.configs[rid] || {}; return c.caps?.[d] ?? c.defaultCap ?? 0; };
-const reasonsFor = (u, d, ignore = []) => C.blockReasons(u, d, { events: events(), exclusions: A.excl[u] || {}, ignore });
-const blocker = (ignore = []) => (u, d) => reasonsFor(u, d, ignore).length > 0;
+const reasonsFor = (u, d, ignore = [], round = null) => C.blockReasons(u, d, { events: events(), exclusions: A.excl[u] || {}, ignore, unlock: round?.unlocks?.[u] || null });
+const blocker = (ignore = [], round = null) => (u, d) => reasonsFor(u, d, ignore, round).length > 0;
 const roundStudents = r => (Array.isArray(r.participants) ? r.participants : studentIds()).filter(st).sort((a, b) => C.byLastName(st(a), st(b)));
 const roundTitle = r => r.title || `Interrogazioni di ${subjName(A.subjects, r.subjectId)}`;
 const roundEvents = r => events().filter(e => e.roundId === r.id);
@@ -113,13 +113,13 @@ const clearFab = () => document.querySelectorAll('[data-fab]').forEach(x => x.re
 function renderRounds(main) {
   clearFab();
   if (A.roundId && A.rounds[A.roundId]) return renderRound(main, A.rounds[A.roundId]);
-  const order = { voting: 0, closed: 1, draft: 2, published: 3, archived: 4 };
+  const order = { voting: 0, paused: 0, closed: 1, draft: 2, published: 3, archived: 4 };
   const list = Object.values(A.rounds).sort((a, b) => (order[a.status] - order[b.status]) || ((b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)));
   const n = studentIds().length;
   page(main, [h('h1', {}, 'Giri di interrogazioni'), h('p', { class: 'sub' }, `${n} studenti · ${Object.keys(A.subjects).length} materie`)], [
     list.length ? list.map(r => {
       const rn = roundStudents(r).length; const voted = roundStudents(r).filter(id => A.votes[r.id]?.[id]?.first).length;
-      const sPill = { draft: 'grey', voting: 'lime', closed: 'violet', published: 'ok', archived: 'grey' }[r.status];
+      const sPill = { draft: 'grey', voting: 'lime', paused: 'grey', closed: 'violet', published: 'ok', archived: 'grey' }[r.status];
       const completed = r.status === 'published' && (r.dates || []).length && (r.dates || []).every(d => d <= C.todayISO());
       return h('button', { class: 'card', style: { display: 'block', width: '100%', textAlign: 'left' }, onclick: () => { A.roundId = r.id; window.scrollTo(0, 0); render(); } },
         h('div', { class: 'row' }, h('span', { class: 'sdot', style: { '--c': subjColor(A.subjects, r.subjectId) } }), h('h3', { class: 'grow' }, roundTitle(r)),
@@ -239,6 +239,10 @@ function renderRound(main, r) {
     h('button', { class: 'btn lime', onclick: () => upd({ status: 'voting', visible: true }, 'Votazione aperta') }, 'Apri votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica'));
   if (r.status === 'voting') actions.append(
+    h('button', { class: 'btn ghost', onclick: () => upd({ status: 'paused' }, 'Votazione in pausa') }, 'Metti in pausa'));
+  if (r.status === 'paused') actions.append(
+    h('button', { class: 'btn lime', onclick: () => upd({ status: 'voting' }, 'Votazione ripresa') }, 'Riprendi votazione'));
+  if (['voting', 'paused'].includes(r.status)) actions.append(
     h('button', { class: 'btn', onclick: async () => { if (await confirmSheet('Chiudere la votazione?', `Hanno votato ${voted.length} studenti su ${n}. Dopo la chiusura nessuno potrà più cambiare scelta (puoi sempre riaprirla).`, 'Chiudi votazione')) upd({ status: 'closed' }, 'Votazione chiusa'); } }, 'Chiudi votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica date'));
   if (r.status === 'closed') actions.append(
@@ -253,13 +257,42 @@ function renderRound(main, r) {
     toggleRow('Mostra i voti alla classe', 'Se attivo, tutti vedono chi ha scelto ogni data (mai la capienza).', r.showVotes, () => upd({ showVotes: !r.showVotes }, r.showVotes ? 'Voti nascosti' : 'Voti visibili alla classe'))));
 
   // statistiche di voto
-  if (['voting', 'closed'].includes(r.status)) {
+  if (['voting', 'paused', 'closed'].includes(r.status)) {
     const totCap = sorted.reduce((s, d) => s + capOf(r.id, d), 0);
     body.push(h('div', { class: 'section-title' }, 'Votazione'),
       h('div', { class: 'stat' }, h('div', {}, h('b', {}, `${voted.length}/${n}`), h('span', {}, 'hanno votato')), h('div', {}, h('b', {}, totCap), h('span', {}, 'posti totali'))),
       totCap < n ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, `Attenzione: ${n} studenti nel giro ma solo ${totCap} posti. Aumenta i posti o aggiungi date.`) : null,
       missing.length ? h('details', { class: 'acc', style: { marginTop: '10px' } }, h('summary', {}, `Non hanno ancora votato (${missing.length})`, icon('right', 'chev')),
-        h('div', { class: 'acc-b', style: { paddingLeft: '16px' } }, missing.map(id => C.fullName(st(id))).join(', '))) : null);
+        h('div', { class: 'acc-b', style: { paddingLeft: '16px' } }, missing.map(id => C.fullName(st(id))).join(', '))) : null,
+      h('details', { class: 'acc', style: { marginTop: '8px' } }, h('summary', {}, `Voti per studente (${voted.length})`, icon('right', 'chev')),
+        h('div', { class: 'acc-b', style: { paddingLeft: '16px' } },
+          voted.length ? voted.map(id => h('div', { class: 'list-item', style: { padding: '8px 0' } },
+            h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(st(id))),
+              h('div', { class: 's' }, `1ª ${votes[id].first ? C.fmtShort(votes[id].first) : '—'} · Riserva ${votes[id].reserve ? C.fmtShort(votes[id].reserve) : '—'}`)),
+            h('button', { class: 'btn sm danger-ghost', onclick: async () => {
+              if (await confirmSheet('Azzerare il voto?', `Il voto di ${C.fullName(st(id))} verrà cancellato.` + (r.status === 'voting' ? ' Potrà votare di nuovo.' : ''), 'Azzera', true))
+                busy(null, () => deleteDoc(doc(db, 'rounds', r.id, 'votes', id)), 'Voto azzerato').catch(() => {});
+            } }, 'Azzera'))) : h('p', { class: 'small muted' }, 'Nessun voto.'))),
+      voted.length ? h('button', { class: 'btn sm danger-ghost', style: { marginTop: '10px' }, onclick: async () => {
+        if (!await confirmSheet('Azzerare tutti i voti?', `Verranno cancellati i voti di ${voted.length} studenti${prop ? ' e l\'ipotesi in corso' : ''}. Tutti dovranno votare di nuovo.`, 'Azzera tutti', true)) return;
+        busy(null, async () => {
+          const ids = Object.keys(votes); const b = writeBatch(db);
+          ids.forEach(id => b.delete(doc(db, 'rounds', r.id, 'votes', id)));
+          b.delete(doc(db, 'rounds', r.id, 'private', 'proposal'));
+          await b.commit();
+        }, 'Tutti i voti azzerati').catch(() => {});
+      } }, icon('trash'), 'Azzera tutti i voti') : null);
+  }
+
+  // date sbloccate per singoli studenti
+  if (!['archived'].includes(r.status)) {
+    const un = Object.entries(r.unlocks || {}).filter(([id, v]) => st(id) && v && v.length);
+    body.push(h('div', { class: 'section-title' }, 'Date sbloccate'),
+      h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Per chi vuole stare in un giorno vicino a un\'altra interrogazione. Vale solo per questo giro; le esclusioni (giorno fisso, assenze) restano.'),
+      un.length ? un.map(([id, v]) => h('button', { class: 'list-item', onclick: () => unlockSheet(r, id) },
+        h('span', { class: 'av' }, C.initials(st(id))), h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(st(id))),
+          h('div', { class: 's' }, v.includes('all') ? 'Tutte le date del giro' : v.slice().sort().map(C.fmtShort).join(', '))), icon('right', 'chev'))) : null,
+      h('button', { class: 'btn sm ghost', style: { marginTop: '8px' }, onclick: () => pickStudentSheet(r) }, icon('plus'), 'Sblocca date per uno studente'));
   }
 
   // tabella date
@@ -267,14 +300,14 @@ function renderRound(main, r) {
   const isCancelled = d => roundEvents(r).some(e => e.date === d && e.cancelled) && !roundEvents(r).some(e => e.date === d && !e.cancelled);
   body.push(h('div', { class: 'section-title' }, 'Date e posti (modificabili)'),
     h('table', { class: 'table' }, h('thead', {}, h('tr', {}, h('th', {}, 'Data'), h('th', {}, 'Posti'),
-      ['voting', 'closed'].includes(r.status) ? [h('th', {}, '1ª'), h('th', {}, 'Ris.')] : r.status !== 'draft' ? h('th', {}, 'Assegnati') : null)),
+      ['voting', 'paused', 'closed'].includes(r.status) ? [h('th', {}, '1ª'), h('th', {}, 'Ris.')] : r.status !== 'draft' ? h('th', {}, 'Assegnati') : null)),
     h('tbody', {}, sorted.map(d => {
       const f = Object.values(votes).filter(v => v.first === d).length, rs = Object.values(votes).filter(v => v.reserve === d).length;
       const capIn = h('input', { class: 'capin', type: 'number', min: '0', inputmode: 'numeric', value: String(capOf(r.id, d)),
         onchange: e => busy(null, () => setDoc(doc(db, 'rounds', r.id, 'private', 'config'), { caps: { [d]: Math.max(0, parseInt(e.target.value, 10) || 0) } }, { merge: true }), 'Posti aggiornati') });
       return h('tr', {}, h('td', {}, h('b', {}, C.fmtShort(d)), isCancelled(d) ? h('span', { class: 'pill danger', style: { marginLeft: '6px' } }, 'Annullata') : null),
         h('td', {}, capIn),
-        ['voting', 'closed'].includes(r.status) ? [h('td', { class: 'num' + (f > capOf(r.id, d) ? ' over' : '') }, f), h('td', { class: 'num' }, rs)]
+        ['voting', 'paused', 'closed'].includes(r.status) ? [h('td', { class: 'num' + (f > capOf(r.id, d) ? ' over' : '') }, f), h('td', { class: 'num' }, rs)]
           : r.status !== 'draft' ? h('td', { class: 'num' }, pubCount(d)) : null);
     }))));
 
@@ -318,6 +351,49 @@ function renderRound(main, r) {
   page(main, hero, body);
 }
 
+/* ---------- Sblocco date per singolo studente ---------- */
+function pickStudentSheet(r) {
+  openSheet('Sblocca date: scegli lo studente', close => {
+    const rr = A.rounds[r.id] || r;
+    return [
+      h('p', { class: 'small muted', style: { marginBottom: '6px' } }, 'Tra parentesi quante date del giro sono bloccate per lui da altre interrogazioni.'),
+      roundStudents(rr).map(id => {
+        const n = (rr.dates || []).filter(d => reasonsFor(id, d).some(x => x.kind === 'event')).length;
+        return h('button', { class: 'list-item', onclick: () => { close(); unlockSheet(rr, id); } },
+          h('span', { class: 'av' }, C.initials(st(id))), h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(st(id))),
+            h('div', { class: 's' }, n ? `${n} ${n === 1 ? 'data bloccata' : 'date bloccate'}` : 'nessuna data bloccata')), icon('right', 'chev'));
+      }),
+    ];
+  });
+}
+function unlockSheet(r0, id) {
+  openSheet('Sblocca date per ' + C.fullName(st(id)), (close, refill) => {
+    const r = A.rounds[r0.id] || r0;
+    const cur = r.unlocks?.[id] || [];
+    const all = cur.includes('all');
+    const save = next => busy(null, () => updateDoc(doc(db, 'rounds', r.id), { [`unlocks.${id}`]: next.length ? next : deleteField() }), 'Sblocchi aggiornati')
+      .then(() => setTimeout(refill, 200)).catch(() => {});
+    const dates = [...(r.dates || [])].sort();
+    return [
+      h('p', { class: 'small muted' }, `${roundTitle(r)}. Le date sbloccate diventano selezionabili per lui anche se sono vicine a un'altra sua interrogazione. Vale anche a votazione aperta.`),
+      h('div', { class: 'card', style: { marginTop: '12px' } }, toggleRow('Tutte le date del giro', 'Toglie il blocco "giorno prima/dopo" su ogni data', all, () => save(all ? [] : ['all']))),
+      h('div', { class: 'section-title' }, 'Date del giro'),
+      dates.map(d => {
+        const ev = reasonsFor(id, d).filter(x => x.kind === 'event');
+        const ex = reasonsFor(id, d).filter(x => x.kind !== 'event');
+        const on = all || cur.includes(d);
+        return h('div', { class: 'list-item', style: { alignItems: 'center' } },
+          h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(d))),
+            ev.length ? h('div', { class: 's' }, ev.map(x => C.reasonText(x, A.subjects, false)).join('; ')) : h('div', { class: 's' }, 'Già libera'),
+            ex.length ? h('div', { class: 's', style: { color: 'var(--danger)' } }, ex.map(x => C.reasonText(x, A.subjects, false)).join('; ') + ' (resta bloccata)') : null),
+          ev.length && !all ? h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(on), onclick: () => save(on ? cur.filter(x => x !== d) : [...cur.filter(x => x !== 'all'), d]) })
+            : ev.length && all ? h('span', { class: 'pill violet' }, 'Sbloccata') : null);
+      }),
+      cur.length ? h('div', { class: 'actions' }, h('button', { class: 'btn block line', onclick: () => save([]) }, 'Togli tutti gli sblocchi')) : null,
+    ];
+  });
+}
+
 async function deleteRound(r) {
   const evs = roundEvents(r); const evIds = new Set(evs.map(e => e.id));
   const recs = Object.values(A.recov).filter(x => x.roundId === r.id);
@@ -342,7 +418,7 @@ async function deleteRound(r) {
 function votesMap(r) { const m = {}; const ok = new Set(roundStudents(r)); for (const [id, v] of Object.entries(A.votes[r.id] || {})) if (ok.has(id) || r.revote) m[id] = { first: v.first, reserve: v.reserve }; return m; }
 async function makeInitialProposal(r, mode) {
   const dates = [...r.dates].sort(); const capacity = {}; dates.forEach(d => (capacity[d] = capOf(r.id, d)));
-  const args = { studentIds: roundStudents(r), dates, capacity, votes: votesMap(r), isBlocked: blocker() };
+  const args = { studentIds: roundStudents(r), dates, capacity, votes: votesMap(r), isBlocked: blocker([], r) };
   const res = mode === 'draw' ? C.buildSchedule(args) : C.proposalFromVotes(args);
   await setDoc(doc(db, 'rounds', r.id, 'private', 'proposal'), { mode: 'initial', method: mode, students: roundStudents(r), dates, ...res, createdAt: serverTimestamp() });
 }
@@ -352,7 +428,7 @@ async function makeMergeProposal(r, { students, dates, useVotes, cancelledEventI
     capacity[d] = capOf(r.id, d);
     prefill[d] = roundEvents(r).filter(e => e.date === d && !e.cancelled).reduce((s, e) => s + (e.studentIds || []).filter(id => !students.includes(id)).length, 0);
   });
-  const res = C.buildSchedule({ studentIds: students, dates, capacity, prefill, votes: useVotes ? votesMap(r) : {}, isBlocked: blocker() });
+  const res = C.buildSchedule({ studentIds: students, dates, capacity, prefill, votes: useVotes ? votesMap(r) : {}, isBlocked: blocker([], r) });
   await setDoc(doc(db, 'rounds', r.id, 'private', 'proposal'), { mode: 'merge', method: 'draw', students, dates, prefill, cancelledEventId, ...res, createdAt: serverTimestamp() });
 }
 
@@ -363,7 +439,7 @@ function proposalEditor(r, p) {
   const votes = A.votes[r.id] || {};
   const chip = (id, d) => {
     const how = p.how?.[id]; const v = votes[id];
-    const bad = d && reasonsFor(id, d).length;
+    const bad = d && reasonsFor(id, d, [], r).length;
     return h('button', { class: `chip tag-${how || 'none'}${bad ? ' warn' : ''}`, title: C.HOW_LABEL[how] || '', onclick: () => moveSheet(r, p, id) },
       C.fullName(st(id)), how === 'reserve' ? h('span', { class: 'muted' }, '·R') : how === 'random' || how === 'novote' ? h('span', { class: 'muted' }, '·S') : null,
       p.method === 'votes' && !v?.first ? h('span', { class: 'muted' }, '·NV') : null);
@@ -404,7 +480,7 @@ function moveSheet(r, p, id) {
     h('p', { class: 'muted small' }, `1ª scelta: ${v.first ? C.fmtShort(v.first) : '—'} · Riserva: ${v.reserve ? C.fmtShort(v.reserve) : '—'}`),
     h('div', { class: 'section-title' }, 'Sposta in'),
     (p.dates || []).map(d => {
-      const rs = reasonsFor(id, d); const n = count(d), cap = capOf(r.id, d);
+      const rs = reasonsFor(id, d, [], r); const n = count(d), cap = capOf(r.id, d);
       return h('button', { class: 'list-item', disabled: d === cur, onclick: () => move(d, close) },
         h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(d)), d === cur ? '  (attuale)' : ''),
           rs.length ? h('div', { class: 's', style: { color: 'var(--danger)' } }, rs.map(x => C.reasonText(x, A.subjects, false)).join('; ')) : null),
@@ -482,7 +558,7 @@ function assignedStudentSheet(ev, id) {
     r ? [h('div', { class: 'section-title' }, 'Sposta in un altro giorno del giro'),
       (r.dates || []).filter(d => d !== ev.date).sort().map(d => {
         const tgt = roundEvents(r).find(e => e.date === d && !e.cancelled);
-        const n = (tgt?.studentIds || []).length; const rs = reasonsFor(id, d, [ev.id]);
+        const n = (tgt?.studentIds || []).length; const rs = reasonsFor(id, d, [ev.id], r);
         return h('button', { class: 'list-item', onclick: e => busy(e.currentTarget, async () => {
           const b = writeBatch(db);
           b.update(doc(db, 'events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id) });

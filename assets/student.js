@@ -1,12 +1,12 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential,
   EmailAuthProvider, collection, doc, onSnapshot, query, where, getDoc, setDoc, updateDoc, addDoc, serverTimestamp,
-} from './firebase.js?v=7';
-import * as C from './core.js?v=7';
+} from './firebase.js?v=8';
+import * as C from './core.js?v=8';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, rulesList, eventCard,
-} from './ui.js?v=7';
+} from './ui.js?v=8';
 
 const root = document.getElementById('app');
 const S = fresh();
@@ -78,7 +78,7 @@ function syncRoundSubs() {
 function stopAll() { unsubs.forEach(u => u()); unsubs = []; Object.values(roundSubs).forEach(u => u()); roundSubs = {}; }
 
 const events = () => Object.values({ ...S.evA, ...S.evB });
-const reasons = (date, ignore = []) => C.blockReasons(S.uid, date, { events: events(), exclusions: S.excl, ignore });
+const reasons = (date, ignore = [], round = null) => C.blockReasons(S.uid, date, { events: events(), exclusions: S.excl, ignore, unlock: round?.unlocks?.[S.uid] || null });
 const inRound = r => !Array.isArray(r.participants) || r.participants.includes(S.uid);
 const canVote = r => (r.status === 'voting' && inRound(r)) || (r.revote?.active && (r.revote.students || []).includes(S.uid));
 const voteDates = r => (r.status === 'voting' ? r.dates : (r.revote?.dates || [])).slice().sort();
@@ -156,7 +156,8 @@ function roundBlock(r) {
     const today = C.todayISO();
     const all = S.allVotes[r.id];
     const cards = voteDates(r).map(d => {
-      const rs = reasons(d); const past = d < today;
+      const rs = reasons(d, [], r); const past = d < today;
+      const unlocked = C.isUnlocked(r.unlocks?.[S.uid], d) && reasons(d).some(x => x.kind === 'event');
       const state = v.first === d ? 'first' : v.reserve === d ? 'reserve' : '';
       const blocked = rs.length > 0;
       const whoFirst = all ? Object.entries(all).filter(([, x]) => x.first === d).map(([id]) => C.shortName(S.students[id])) : null;
@@ -166,6 +167,7 @@ function roundBlock(r) {
         h('div', { class: 'info' },
           h('div', { class: 't' }, state === 'first' ? '1ª scelta' : state === 'reserve' ? 'Riserva' : blocked ? 'Non disponibile' : past ? 'Data passata' : 'Disponibile'),
           blocked ? rs.map(x => h('div', { class: 'r' }, C.reasonText(x, S.subjects))) : null,
+          unlocked && !blocked ? h('div', { class: 'r', style: { color: 'var(--violet-ink)', fontWeight: '700' } }, 'Sbloccata dall\'admin per te') : null,
           blocked && state ? h('div', { class: 'r', style: { color: 'var(--danger)', fontWeight: '700' } }, 'La tua scelta ora è bloccata: cambiala') : null,
           whoFirst && (whoFirst.length || whoRes.length) ? h('div', { class: 'who' },
             whoFirst.length ? `1ª: ${whoFirst.join(', ')}` : '', whoFirst.length && whoRes.length ? ' · ' : '', whoRes.length ? `Riserva: ${whoRes.join(', ')}` : '') : null),
@@ -180,10 +182,11 @@ function roundBlock(r) {
         h('div', {}, h('span', {}, 'Riserva  '), h('b', {}, v.reserve ? C.fmtShort(v.reserve) : '—'))));
   }
 
-  if (r.status === 'closed') {
-    return h('section', { class: 'round' }, head(h('span', { class: 'pill grey' }, 'Chiusa')),
-      h('div', { class: 'card' }, h('h3', {}, 'In attesa della pubblicazione'),
-        h('p', { class: 'muted small', style: { marginTop: '4px' } }, 'L\'admin sta sistemando le date. Le tue scelte:'),
+  if (r.status === 'closed' || r.status === 'paused') {
+    const paused = r.status === 'paused';
+    return h('section', { class: 'round' }, head(h('span', { class: 'pill grey' }, paused ? 'In pausa' : 'Chiusa')),
+      h('div', { class: 'card' }, h('h3', {}, paused ? 'Votazione in pausa' : 'In attesa della pubblicazione'),
+        h('p', { class: 'muted small', style: { marginTop: '4px' } }, paused ? 'L\'admin ha messo in pausa la votazione: potrai cambiare le tue scelte quando riprende. Le tue scelte:' : 'L\'admin sta sistemando le date. Le tue scelte:'),
         h('div', { class: 'row wrap', style: { marginTop: '10px' } },
           h('span', { class: 'pill violet' }, '1ª: ' + (v.first ? C.fmtShort(v.first) : 'nessuna')),
           h('span', { class: 'pill', style: { background: '#e7e3fd' } }, 'Riserva: ' + (v.reserve ? C.fmtShort(v.reserve) : 'nessuna')))));
