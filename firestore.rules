@@ -39,7 +39,8 @@ service cloud.firestore {
     match /rounds/{rid} {
       function round() { return get(/databases/$(database)/documents/rounds/$(rid)).data; }
       function canVote() {
-        return round().status == 'voting'
+        return (round().status == 'voting'
+                && (round().get('participants', null) == null || me() in round().get('participants', [])))
           || (round().get('revote', {}).get('active', false) == true && me() in round().get('revote', {}).get('students', []));
       }
       function validVote() {

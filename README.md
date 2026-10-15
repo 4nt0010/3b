@@ -33,14 +33,15 @@ firestore.rules       regole di sicurezza (da incollare in Firebase)
 1. Apri `/3b/admin/` e accedi con l'email dell'account admin creato in Firebase (se è `admin@3b.app` basta scrivere `admin`).
 2. **Altro → Materie**: crea le materie e scegli un colore per ognuna.
 3. **Studenti → +**: incolla l'elenco della classe, un nome per riga (`Nome Cognome`; per nomi o cognomi composti usa la virgola: `Maria Grazia, De Luca`). Il sito crea gli account: nome utente `nome.cognome`, password iniziale uguale al nome utente.
-4. **Giri → +**: crea un giro con materia, giorni in cui viene il docente e posti per giorno. Poi *Apri votazione*.
+4. **Giri → +**: crea un giro con materia, giorni in cui viene il docente, posti per giorno e chi partecipa (di default tutta la classe). Poi *Apri votazione*.
+5. **Studenti → scheda**: puoi correggere nome e cognome, impostare un **giorno fisso escluso** (es. ogni lunedì per uno studente atleta) e singole **date escluse**.
 
 ## Come funziona un giro
 
 Bozza → Votazione aperta → Votazione chiusa → Ipotesi (sorteggio o sistemazione manuale) → Pubblicato → Archiviato.
 
 - Gli studenti scelgono una **prima scelta** e una **riserva**, modificabili finché la votazione è aperta.
-- Una data è bloccata se lo studente ha un'altra interrogazione lo stesso giorno o il giorno di calendario prima/dopo (quindi venerdì e lunedì sono compatibili), oppure se l'admin gli ha escluso quella data. Le verifiche non bloccano.
+- Una data è bloccata se lo studente ha un'altra interrogazione lo stesso giorno o il giorno di calendario prima/dopo (quindi venerdì e lunedì sono compatibili), oppure se l'admin gli ha escluso quella data o quel giorno della settimana. Le verifiche non bloccano.
 - Il **sorteggio**: chi rientra nei posti della prima scelta resta lì (si sorteggia tra chi l'ha votata se in esubero); chi resta fuori passa alla riserva; chi resta ancora fuori e chi non ha votato va in un giorno libero a caso.
 - Nulla viene pubblicato finché l'admin non accetta l'ipotesi.
 - **Annulla giornata**: sposta automaticamente gli interrogati (con ipotesi da accettare) oppure apre una rivotazione solo per loro.

@@ -91,7 +91,7 @@ export function openSheet(title, build, onClose) {
   sheet.append(h('div', { class: 'grab' }),
     h('div', { class: 'sheet-head' }, h('h2', {}, title), h('button', { class: 'iconbtn', 'aria-label': 'Chiudi', onclick: close }, icon('close'))),
     content);
-  const fill = () => { content.replaceChildren(); const r = build(close, fill); if (r) content.append(...[].concat(r)); };
+  const fill = () => { content.replaceChildren(); const r = build(close, fill); if (r) content.append(...[r].flat(Infinity).filter(x => x != null && x !== false)); };
   fill();
   document.body.append(back, sheet); document.body.style.overflow = 'hidden';
   sheets.push(close);
@@ -149,7 +149,7 @@ export function shell(root, tabs, current, onTab, badges = {}) {
   return main;
 }
 export function page(main, heroKids, bodyKids) {
-  main.replaceChildren(h('div', { class: 'hero' }, heroKids), h('div', { class: 'body' }, h('div', { class: 'body-inner' }, bodyKids)));
+  main.replaceChildren(h('div', { class: 'hero' }, h('div', { class: 'hero-inner' }, heroKids)), h('div', { class: 'body' }, h('div', { class: 'body-inner' }, bodyKids)));
 }
 
 /* ---------- Avatar / eventi ---------- */

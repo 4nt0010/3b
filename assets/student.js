@@ -60,7 +60,7 @@ function start() {
   listen('evA', query(collection(db, 'events'), where('type', '==', 'interrogazione')), q => (S.evA = toMap(q)));
   listen('evB', query(collection(db, 'events'), where('studentIds', 'array-contains', uid)), q => (S.evB = toMap(q)));
   listen('rounds', query(collection(db, 'rounds'), where('visible', '==', true)), q => { S.rounds = toMap(q); syncRoundSubs(); });
-  listen('excl', doc(db, 'exclusions', uid), s => (S.excl = s.exists() ? (s.data().dates || {}) : {}));
+  listen('excl', doc(db, 'exclusions', uid), s => (S.excl = s.exists() ? s.data() : {}));
   listen('swOut', query(collection(db, 'swaps'), where('fromUid', '==', uid)), q => (S.swapsOut = toMap(q)));
   listen('swIn', query(collection(db, 'swaps'), where('toUid', '==', uid)), q => (S.swapsIn = toMap(q)));
   listen('recov', query(collection(db, 'recoveries'), where('uid', '==', uid)), q => (S.recov = toMap(q)));
@@ -79,7 +79,8 @@ function stopAll() { unsubs.forEach(u => u()); unsubs = []; Object.values(roundS
 
 const events = () => Object.values({ ...S.evA, ...S.evB });
 const reasons = (date, ignore = []) => C.blockReasons(S.uid, date, { events: events(), exclusions: S.excl, ignore });
-const canVote = r => r.status === 'voting' || (r.revote?.active && (r.revote.students || []).includes(S.uid));
+const inRound = r => !Array.isArray(r.participants) || r.participants.includes(S.uid);
+const canVote = r => (r.status === 'voting' && inRound(r)) || (r.revote?.active && (r.revote.students || []).includes(S.uid));
 const voteDates = r => (r.status === 'voting' ? r.dates : (r.revote?.dates || [])).slice().sort();
 
 /* ---------- Render ---------- */
@@ -139,7 +140,7 @@ function eventSheet(ev) {
 
 /* ---------- Votazioni ---------- */
 function renderVote(main) {
-  const rounds = Object.values(S.rounds).filter(r => r.status !== 'archived' && r.status !== 'draft')
+  const rounds = Object.values(S.rounds).filter(r => r.status !== 'archived' && r.status !== 'draft' && (inRound(r) || canVote(r)))
     .sort((a, b) => (canVote(b) - canVote(a)) || ((b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)));
   page(main, [h('h1', {}, 'Votazioni'), h('p', { class: 'sub' }, 'Scegli una prima data e una riserva per ogni giro aperto.')],
     rounds.length ? rounds.map(roundBlock) : h('div', { class: 'empty' }, h('b', {}, 'Nessun giro in corso'), 'Quando l\'admin apre una votazione la trovi qui.'));
