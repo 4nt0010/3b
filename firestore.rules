@@ -29,6 +29,12 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // Orario settimanale della classe: lo leggono tutti, lo modifica solo l'admin
+    match /timetable/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
     // Interrogazioni: visibili a tutti. Verifiche: solo agli studenti assegnati.
     match /events/{id} {
       allow read: if isAdmin()

@@ -1,20 +1,20 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
   collection, doc, onSnapshot, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
-} from './firebase.js?v=8';
-import * as C from './core.js?v=8';
+} from './firebase.js?v=9';
+import * as C from './core.js?v=9';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
-  subjColor, subjName, calendar, toggleRow,
-} from './ui.js?v=8';
+  subjColor, subjName, calendar, toggleRow, weekGrid, cellName, cellColor,
+} from './ui.js?v=9';
 
 const root = document.getElementById('app');
 const A = fresh();
 function fresh() {
   return {
     uid: null, students: {}, subjects: {}, events: {}, rounds: {}, configs: {}, proposals: {}, votes: {},
-    excl: {}, swaps: {}, recov: {}, ready: new Set(),
-    tab: 'giri', roundId: null, cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' },
+    excl: {}, swaps: {}, recov: {}, tt: null, ready: new Set(),
+    tab: 'giri', roundId: null, more: null, ttDay: C.isWeekend(C.todayISO()) ? '1' : C.weekdayOf(C.todayISO()), cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' },
   };
 }
 let unsubs = [], roundSubs = {};
@@ -58,6 +58,7 @@ function start() {
   listen('excl', collection(db, 'exclusions'), q => { A.excl = {}; q.forEach(d => (A.excl[d.id] = d.data())); });
   listen('swaps', collection(db, 'swaps'), q => (A.swaps = toMap(q)));
   listen('recov', collection(db, 'recoveries'), q => (A.recov = toMap(q)));
+  listen('tt', doc(db, 'timetable', 'week'), s => (A.tt = s.exists() ? s.data() : null));
 }
 function syncRoundSubs() {
   const want = {};
@@ -97,10 +98,10 @@ function render() {
   if (!A.uid) return;
   const a = document.activeElement;
   if (a && root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { a.addEventListener('blur', () => setTimeout(schedule, 400), { once: true }); return; }
-  if (A.ready.size < 7) return renderLoader(root);
+  if (A.ready.size < 8) return renderLoader(root);
   const badges = { richieste: Object.values(A.swaps).filter(s => s.status === 'pending_admin').length + Object.values(A.recov).filter(r => r.status === 'open').length };
   const y = window.scrollY;
-  const main = shell(root, TABS, A.tab, t => { A.tab = t; A.roundId = null; window.scrollTo(0, 0); render(); }, badges);
+  const main = shell(root, TABS, A.tab, t => { A.tab = t; A.roundId = null; A.more = null; window.scrollTo(0, 0); render(); }, badges);
   ({ giri: renderRounds, cal: renderCal, studenti: renderStudents, richieste: renderRequests, altro: renderMore })[A.tab](main);
   window.scrollTo(0, y);
 }
@@ -174,6 +175,22 @@ function roundSheet(r = null) {
       dateIn.value = ''; refill();
     };
     capIn.oninput = upd;
+    subj.onchange = refill;
+    // Suggerimento dall'orario: aggiunge i giorni della settimana successiva in cui c'è lezione della materia
+    const ttWd = C.subjectWeekdays(A.tt, subj.value);
+    const addFromTT = () => {
+      let from = dates.length ? C.addDays(dates[dates.length - 1], 1) : C.addDays(C.todayISO(), 1);
+      if (from <= C.todayISO()) from = C.addDays(C.todayISO(), 1);
+      const add = [];
+      for (let i = 0; i < 7; i++) { const d = C.addDays(from, i); if (!C.isWeekend(d) && ttWd.includes(C.weekdayOf(d)) && !dates.includes(d)) add.push(d); }
+      if (!add.length) return toast('Nessun giorno trovato nell\'orario', 'error');
+      add.forEach(d => (caps[d] = def())); dates = [...dates, ...add].sort(); refill();
+    };
+    const ttHint = ttWd.length ? h('button', { class: 'btn sm line', style: { marginTop: '8px' }, onclick: addFromTT }, icon('plus'),
+      dates.length ? 'Aggiungi la settimana dopo dall\'orario' : 'Aggiungi i prossimi giorni dall\'orario')
+      : null;
+    const ttNote = ttWd.length ? h('p', { class: 'small muted', style: { marginTop: '6px' } },
+      `Da orario: lezione di ${C.WEEKDAYS.filter(([w]) => ttWd.includes(w)).map(([, l]) => l.toLowerCase()).join(', ')}.`) : null;
     const partBlock = h('div', { class: 'field' },
       h('div', { class: 'row', style: { justifyContent: 'space-between' } },
         h('span', { class: 'small', style: { fontWeight: '700', color: 'var(--muted)' } }, `Chi partecipa: ${part.size} su ${ids.length}`),
@@ -192,6 +209,7 @@ function roundSheet(r = null) {
           h('label', { style: { width: '92px' } }, h('span', { class: 'small muted', style: { display: 'block', marginBottom: '4px', fontWeight: '700' } }, 'Posti'), capIn),
           h('button', { class: 'btn ghost', onclick: add }, icon('plus'), 'Aggiungi')),
         h('p', { class: 'small muted', style: { marginTop: '6px' } }, 'Ogni data parte con i posti indicati qui sopra; poi puoi cambiarli una per una con − e +. La classe non vede mai questi numeri.'),
+        ttNote, ttHint,
         dateRows),
       summaryEl = h('div', { class: 'card', style: { fontWeight: '700', fontSize: '14px' } }, ''),
       h('div', { class: 'actions' },
@@ -588,7 +606,7 @@ function assignedStudentSheet(ev, id) {
    ========================================================= */
 function renderCal(main) {
   clearFab();
-  const { hero, body } = calendar({ state: A.cal, events: events(), students: A.students, subjects: A.subjects, me: null, onChange: render, onEventClick: adminEventSheet });
+  const { hero, body } = calendar({ state: A.cal, events: events(), students: A.students, subjects: A.subjects, me: null, onChange: render, onEventClick: adminEventSheet, timetable: A.tt });
   page(main, hero, body);
   fab('Aggiungi evento', () => eventSheet(A.cal.sel));
 }
@@ -844,6 +862,7 @@ function recoverSheet(rec) {
    ========================================================= */
 function renderMore(main) {
   clearFab();
+  if (A.more === 'orario') return renderTimetable(main);
   const subs = Object.values(A.subjects).sort((a, b) => a.name.localeCompare(b.name));
   page(main, [h('h1', {}, 'Altro'), h('p', { class: 'sub' }, 'Materie e impostazioni')], [
     h('div', { class: 'row', style: { justifyContent: 'space-between' } }, h('div', { class: 'section-title', style: { margin: '2px' } }, 'Materie'),
@@ -851,6 +870,13 @@ function renderMore(main) {
     subs.length ? subs.map(s => h('button', { class: 'list-item', onclick: () => subjectSheet(s) }, h('span', { class: 'sdot', style: { '--c': s.color, width: '22px', height: '22px', borderRadius: '8px' } }),
       h('div', { class: 'grow' }, h('div', { class: 't' }, s.name)), icon('right', 'chev')))
       : h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Nessuna materia. Creane una per iniziare.'),
+    h('div', { class: 'section-title' }, 'Classe'),
+    (() => {
+      const hrs = ttHours().length; const n = C.WEEKDAYS.reduce((a, [w]) => a + ttRow(w).filter(c => !C.ttEmpty(c)).length, 0);
+      return h('button', { class: 'list-item', onclick: () => { A.more = 'orario'; window.scrollTo(0, 0); render(); } }, icon('cal'),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, 'Orario settimanale'),
+          h('div', { class: 's' }, hrs ? `${hrs} ore al giorno · ${n} lezioni inserite` : 'Non ancora inserito')), icon('right', 'chev'));
+    })(),
     h('div', { class: 'section-title' }, 'Sito'),
     h('a', { class: 'list-item', href: '../', target: '_blank', style: { color: 'inherit', textDecoration: 'none' } }, icon('ext'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Apri il sito studenti'))),
     h('button', { class: 'list-item', onclick: async () => { if (await confirmSheet('Uscire?', 'Dovrai rientrare con le credenziali admin.', 'Esci')) signOut(auth); } }, icon('logout'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Esci'))),
@@ -871,9 +897,180 @@ function subjectSheet(s = null) {
         if (s) await updateDoc(doc(db, 'subjects', s.id), { name: n, color }); else await addDoc(collection(db, 'subjects'), { name: n, color });
       }, 'Materia salvata').then(close).catch(() => {}) }, 'Salva'),
       s ? h('button', { class: 'btn block danger-ghost', onclick: async () => {
-        const used = events().some(e => e.subjectId === s.id) || Object.values(A.rounds).some(r => r.subjectId === s.id);
-        if (used) return toast('Materia in uso in eventi o giri: non si può eliminare', 'error');
+        const used = events().some(e => e.subjectId === s.id) || Object.values(A.rounds).some(r => r.subjectId === s.id) || C.subjectWeekdays(A.tt, s.id).length > 0;
+        if (used) return toast('Materia in uso in eventi, giri o nell\'orario: non si può eliminare', 'error');
         if (await confirmSheet('Eliminare la materia?', '', 'Elimina', true)) { await busy(null, () => deleteDoc(doc(db, 'subjects', s.id)), 'Materia eliminata'); close(); }
       } }, 'Elimina') : null),
+  ]);
+}
+
+/* =========================================================
+   ORARIO SETTIMANALE (Altro → Orario settimanale)
+   Un solo documento: timetable/week
+   ========================================================= */
+const ttHours = () => A.tt?.hours || [];
+const ttRow = wd => A.tt?.days?.[wd] || [];
+const dayLabel = wd => C.WEEKDAYS.find(x => x[0] === wd)?.[1] || '';
+// Riallinea ogni giorno al numero di ore (Firestore non accetta undefined: le ore libere sono null)
+function normDays(days, n) {
+  const out = {};
+  for (const [w] of C.WEEKDAYS) out[w] = Array.from({ length: n }, (_, i) => (C.ttEmpty(days?.[w]?.[i]) ? null : days[w][i]));
+  return out;
+}
+async function saveTT({ hours = ttHours(), days = A.tt?.days || {} } = {}) {
+  await setDoc(doc(db, 'timetable', 'week'), { hours, days: normDays(days, hours.length), updatedAt: serverTimestamp() });
+}
+
+function renderTimetable(main) {
+  const hours = ttHours(); const wd = A.ttDay; const row = ttRow(wd);
+  const subsCount = Object.keys(A.subjects).length;
+  page(main, [
+    h('button', { class: 'back', onclick: () => { A.more = null; render(); } }, icon('left'), 'Altro'),
+    h('h1', {}, 'Orario settimanale'),
+    h('p', { class: 'sub' }, 'Lo vede tutta la classe nel calendario, sotto gli impegni del giorno.'),
+    hours.length ? h('div', { class: 'seg', style: { marginTop: '14px' } },
+      C.WEEKDAYS.map(([w, l]) => h('button', { class: w === wd ? 'active' : '', onclick: () => { A.ttDay = w; render(); } }, l.slice(0, 3)))) : null,
+  ], hours.length ? [
+    h('div', { class: 'day-title' }, h('h2', {}, dayLabel(wd)),
+      h('span', { class: 'muted small' }, `${row.filter(c => !C.ttEmpty(c)).length} su ${hours.length} ore`)),
+    !subsCount ? h('div', { class: 'card warn', style: { marginBottom: '10px' } }, h('span', { class: 'small' }, 'Non hai ancora creato materie: puoi scrivere le lezioni come testo libero, oppure crea prima le materie in Altro.')) : null,
+    hours.map((hr, i) => {
+      const c = row[i] || null; const empty = C.ttEmpty(c);
+      return h('button', { class: 'tt-row' + (empty ? ' free' : ''), style: { '--c': cellColor(c, A.subjects) }, onclick: () => cellSheet(wd, i) },
+        h('div', { class: 'tt-when' }, h('b', {}, `${C.ordinal(i)} ora`), h('small', {}, `${hr.start}–${hr.end}`)),
+        h('div', { class: 'tt-bar' }),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, empty ? 'Libera · tocca per inserire' : cellName(c, A.subjects)), !empty && c.n ? h('div', { class: 's' }, c.n) : null),
+        icon('right', 'chev'));
+    }),
+    h('div', { class: 'row wrap', style: { marginTop: '12px' } },
+      h('button', { class: 'btn sm ghost', onclick: () => copyDaySheet(wd) }, 'Copia da un altro giorno'),
+      row.some(c => !C.ttEmpty(c)) ? h('button', { class: 'btn sm danger-ghost', onclick: async () => {
+        if (!(await confirmSheet(`Svuotare ${dayLabel(wd).toLowerCase()}?`, 'Tutte le ore del giorno diventano libere.', 'Svuota', true))) return;
+        await busy(null, () => saveTT({ days: { ...(A.tt?.days || {}), [wd]: [] } }), 'Giorno svuotato');
+      } }, 'Svuota giorno') : null),
+
+    h('div', { class: 'section-title' }, 'Tutta la settimana'),
+    h('p', { class: 'small muted', style: { margin: '-4px 2px 10px' } }, 'Tocca una casella per modificarla.'),
+    weekGrid(A.tt, A.subjects, { onCell: (w, i) => cellSheet(w, i) }),
+
+    h('div', { class: 'section-title' }, 'Ore e orari'),
+    hours.map((hr, i) => h('button', { class: 'list-item', onclick: () => hourSheet(i) },
+      h('span', { class: 'av' }, C.ordinal(i)),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, `${hr.start} – ${hr.end}`), h('div', { class: 's' }, `${C.ordinal(i)} ora`)),
+      icon('right', 'chev'))),
+    h('div', { class: 'row wrap', style: { marginTop: '12px' } },
+      h('button', { class: 'btn sm', onclick: () => hourSheet(null) }, icon('plus'), 'Aggiungi ora'),
+      h('button', { class: 'btn sm line', onclick: () => setupHoursSheet() }, 'Rigenera gli orari')),
+  ] : [
+    h('div', { class: 'empty' }, h('b', {}, 'Orario non ancora inserito'), 'Prima imposta le ore della giornata (inizio, durata, quante sono), poi inserisci le materie giorno per giorno.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: () => setupHoursSheet() }, 'Imposta le ore')),
+  ]);
+}
+
+/* Genera le fasce orarie tutte uguali (le singole ore si possono poi ritoccare, es. per la ricreazione) */
+function setupHoursSheet() {
+  const old = ttHours();
+  const start = h('input', { type: 'time', value: old[0]?.start || '08:00' });
+  const dur = h('input', { type: 'number', min: '20', max: '120', inputmode: 'numeric', value: '60' });
+  const count = h('input', { type: 'number', min: '1', max: '10', inputmode: 'numeric', value: String(old.length || 6) });
+  openSheet(old.length ? 'Rigenera gli orari' : 'Imposta le ore', close => [
+    h('p', { class: 'muted', style: { marginBottom: '14px' } }, old.length
+      ? 'Ricalcola inizio e fine di tutte le ore. Le materie già inserite restano al loro posto (1ª ora, 2ª ora…).'
+      : 'Le ore vengono create tutte della stessa durata: poi puoi modificarne una per una.'),
+    h('label', { class: 'field' }, h('span', {}, 'La 1ª ora inizia alle'), start),
+    h('div', { class: 'row' },
+      h('label', { class: 'field grow' }, h('span', {}, 'Durata (minuti)'), dur),
+      h('label', { class: 'field grow' }, h('span', {}, 'Ore al giorno'), count)),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+      const d = parseInt(dur.value, 10), n = parseInt(count.value, 10);
+      if (!start.value) throw new Error('Scegli l\'orario di inizio');
+      if (!(d >= 20 && d <= 120)) throw new Error('Durata tra 20 e 120 minuti');
+      if (!(n >= 1 && n <= 10)) throw new Error('Da 1 a 10 ore al giorno');
+      if (n < old.length && C.WEEKDAYS.some(([w]) => ttRow(w).slice(n).some(c => !C.ttEmpty(c)))
+        && !(await confirmSheet('Togliere delle ore?', `Le lezioni inserite dopo la ${C.ordinal(n - 1)} ora verranno cancellate.`, 'Continua', true))) throw new Error('Operazione annullata');
+      const hours = Array.from({ length: n }, (_, i) => ({ start: C.addMinutes(start.value, i * d), end: C.addMinutes(start.value, (i + 1) * d) }));
+      await saveTT({ hours });
+    }, 'Orari salvati').then(close).catch(() => {}) }, 'Salva')),
+  ]);
+}
+
+function hourSheet(i = null) {
+  const hours = ttHours(); const hr = i == null ? null : hours[i];
+  const lastEnd = hours[hours.length - 1]?.end || '08:00';
+  const start = h('input', { type: 'time', value: hr?.start || lastEnd });
+  const end = h('input', { type: 'time', value: hr?.end || C.addMinutes(lastEnd, 60) });
+  openSheet(hr ? `${C.ordinal(i)} ora` : 'Nuova ora', close => [
+    h('div', { class: 'row' },
+      h('label', { class: 'field grow' }, h('span', {}, 'Inizio'), start),
+      h('label', { class: 'field grow' }, h('span', {}, 'Fine'), end)),
+    hr ? null : h('p', { class: 'small muted' }, `Diventa la ${C.ordinal(hours.length)} ora, in fondo alla giornata.`),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+        if (!start.value || !end.value) throw new Error('Inserisci inizio e fine');
+        if (end.value <= start.value) throw new Error('La fine deve essere dopo l\'inizio');
+        if (hours.length >= 10 && !hr) throw new Error('Massimo 10 ore al giorno');
+        const next = hours.map(x => ({ ...x }));
+        if (hr) next[i] = { start: start.value, end: end.value }; else next.push({ start: start.value, end: end.value });
+        await saveTT({ hours: next });
+      }, 'Ora salvata').then(close).catch(() => {}) }, 'Salva'),
+      hr ? h('button', { class: 'btn block danger-ghost', onclick: async () => {
+        const used = C.WEEKDAYS.some(([w]) => !C.ttEmpty(ttRow(w)[i]));
+        if (!(await confirmSheet(`Eliminare la ${C.ordinal(i)} ora?`, used ? 'Le lezioni di quest\'ora vengono cancellate e le ore successive scalano di una.' : 'Le ore successive scalano di una.', 'Elimina', true))) return;
+        const days = {}; for (const [w] of C.WEEKDAYS) days[w] = ttRow(w).filter((_, j) => j !== i);
+        await busy(null, () => saveTT({ hours: hours.filter((_, j) => j !== i), days }), 'Ora eliminata'); close();
+      } }, icon('trash'), 'Elimina quest\'ora') : null),
+  ]);
+}
+
+function cellSheet(wd, i) {
+  const hr = ttHours()[i]; if (!hr) return;
+  const c = ttRow(wd)[i] || null;
+  const subs = Object.values(A.subjects).sort((a, b) => a.name.localeCompare(b.name));
+  let sel = C.ttEmpty(c) ? '' : c.s ? c.s : '__text';
+  const text = h('input', { type: 'text', value: c?.t || '', placeholder: 'es. Religione, Ed. civica' });
+  const note = h('input', { type: 'text', value: c?.n || '', placeholder: 'Facoltativa (es. Laboratorio, Palestra)' });
+  const nextFree = i + 1 < ttHours().length;
+  let alsoNext = false;
+  const radio = (val, label, color) => h('label', { class: 'radio-row' },
+    h('input', { type: 'radio', name: 'ttcell', checked: sel === val, onchange: () => { sel = val; if (val === '__text') setTimeout(() => text.focus(), 0); } }),
+    color ? h('span', { class: 'sdot', style: { '--c': color, width: '18px', height: '18px', borderRadius: '6px' } }) : null,
+    h('div', { class: 'grow', style: { fontWeight: '700' } }, label));
+  openSheet(`${dayLabel(wd)} · ${C.ordinal(i)} ora`, close => [
+    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, `${hr.start}–${hr.end}`),
+    subs.map(s => radio(s.id, s.name, s.color)),
+    (() => {
+      const r = h('input', { type: 'radio', name: 'ttcell', checked: sel === '__text', onchange: () => { sel = '__text'; } });
+      text.oninput = () => { sel = '__text'; r.checked = true; }; // scrivendo si seleziona da solo
+      return h('label', { class: 'radio-row' }, r,
+        h('div', { class: 'grow' }, h('div', { style: { fontWeight: '700', marginBottom: '6px' } }, 'Altra lezione (testo libero)'), text));
+    })(),
+    radio('', 'Ora libera / nessuna lezione'),
+    h('label', { class: 'field', style: { marginTop: '14px' } }, h('span', {}, 'Nota'), note),
+    nextFree ? h('label', { class: 'check', style: { borderBottom: 0 } },
+      h('input', { type: 'checkbox', onchange: e => (alsoNext = e.target.checked) }),
+      h('div', { class: 'grow' }, `Uguale anche alla ${C.ordinal(i + 1)} ora (ora doppia)`)) : null,
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+      if (text === document.activeElement) text.blur();
+      let cell = null;
+      if (sel === '__text') { const t = text.value.trim(); if (!t) throw new Error('Scrivi il nome della lezione'); cell = { t }; }
+      else if (sel) cell = { s: sel };
+      if (cell && note.value.trim()) cell.n = note.value.trim();
+      const r = Array.from({ length: ttHours().length }, (_, j) => ttRow(wd)[j] || null);
+      r[i] = cell; if (alsoNext && nextFree) r[i + 1] = cell ? { ...cell } : null;
+      await saveTT({ days: { ...(A.tt?.days || {}), [wd]: r } });
+    }, 'Orario aggiornato').then(close).catch(() => {}) }, 'Salva')),
+  ]);
+}
+
+function copyDaySheet(wd) {
+  const others = C.WEEKDAYS.filter(([w]) => w !== wd);
+  openSheet(`Copia in ${dayLabel(wd).toLowerCase()}`, close => [
+    h('p', { class: 'muted', style: { marginBottom: '8px' } }, `Le lezioni di ${dayLabel(wd).toLowerCase()} vengono sostituite con quelle del giorno scelto.`),
+    others.map(([w, l]) => {
+      const n = ttRow(w).filter(c => !C.ttEmpty(c)).length;
+      return h('button', { class: 'list-item', disabled: !n, style: n ? null : { opacity: .45 }, onclick: e => busy(e.currentTarget,
+        () => saveTT({ days: { ...(A.tt?.days || {}), [wd]: ttRow(w).map(c => (C.ttEmpty(c) ? null : { ...c })) } }), `Copiato da ${l.toLowerCase()}`).then(close).catch(() => {}) },
+        h('div', { class: 'grow' }, h('div', { class: 't' }, l), h('div', { class: 's' }, n ? `${n} ${n === 1 ? 'lezione' : 'lezioni'}` : 'vuoto')), icon('right', 'chev'));
+    }),
   ]);
 }

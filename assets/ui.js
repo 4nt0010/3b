@@ -1,4 +1,4 @@
-import * as C from './core.js?v=8';
+import * as C from './core.js?v=9';
 
 /* ---------- DOM helper ---------- */
 export function h(tag, attrs = {}, ...kids) {
@@ -182,7 +182,7 @@ export function eventCard(ev, { students, subjects, me, totalStudents, onClick, 
 
 /* ---------- Calendario ----------
    state: { view: 'week'|'month', sel: 'YYYY-MM-DD', filter: 'all'|'mine' } */
-export function calendar({ state, events, students, subjects, me, onChange, onEventClick, title = null, extraTop = null, extraBody = null }) {
+export function calendar({ state, events, students, subjects, me, onChange, onEventClick, title = null, extraTop = null, extraBody = null, timetable = null }) {
   const today = C.todayISO();
   const visible = events.filter(e => state.filter !== 'mine' || (e.studentIds || []).includes(me));
   const byDay = {};
@@ -233,8 +233,62 @@ export function calendar({ state, events, students, subjects, me, onChange, onEv
       h('span', { class: 'muted small' }, dayEv.length ? `${dayEv.length} ${dayEv.length === 1 ? 'impegno' : 'impegni'}` : '')),
     dayEv.length ? dayEv.map(e => eventCard(e, { students, subjects, me, totalStudents: total, onClick: onEventClick }))
       : h('div', { class: 'empty' }, h('b', {}, 'Giornata libera'), state.filter === 'mine' ? 'Nessun tuo impegno in questo giorno.' : 'Nessun impegno in questo giorno.'),
+    timetable ? (() => {
+      // evidenzia nell'orario le materie con un impegno (per lo studente: solo i suoi)
+      const marks = {};
+      dayEv.filter(e => !e.cancelled && (!me || (e.studentIds || []).includes(me)))
+        .forEach(e => { if (!marks[e.subjectId] || e.type === 'interrogazione') marks[e.subjectId] = e.type === 'verifica' ? 'Verifica' : 'Interrogazione'; });
+      return daySchedule(timetable, state.sel, subjects, { marks, onWeek: () => weekSheet(timetable, subjects) });
+    })() : null,
   ];
   return { hero, body };
+}
+
+/* ---------- Orario settimanale ---------- */
+export const cellName = (c, subjects) => (C.ttEmpty(c) ? '' : c.s ? subjName(subjects, c.s) : c.t);
+export const cellColor = (c, subjects) => (C.ttEmpty(c) ? 'transparent' : c.s ? subjColor(subjects, c.s) : '#ececf2');
+
+/* Griglia lun–ven. Con onCell (editor admin) ogni ora è una casella cliccabile;
+   altrimenti le ore consecutive della stessa materia sono unite. */
+export function weekGrid(tt, subjects, { onCell = null, todayWd = null } = {}) {
+  const hours = tt?.hours || [];
+  const kids = [h('div', { style: { gridColumn: 1, gridRow: 1 } })];
+  C.WEEKDAYS.forEach(([w, l], j) => kids.push(h('div', { class: 'tt-wd' + (w === todayWd ? ' today' : ''), style: { gridColumn: j + 2, gridRow: 1 } }, l.slice(0, 3))));
+  hours.forEach((hr, i) => kids.push(h('div', { class: 'tt-hr', style: { gridColumn: 1, gridRow: i + 2 } }, h('b', {}, C.ordinal(i)), h('small', {}, hr.start))));
+  C.WEEKDAYS.forEach(([w], j) => {
+    if (onCell) {
+      hours.forEach((hr, i) => {
+        const c = tt?.days?.[w]?.[i] || null;
+        kids.push(h('button', { class: 'tt-c' + (C.ttEmpty(c) ? ' empty' : ''), style: { gridColumn: j + 2, gridRow: i + 2, '--c': cellColor(c, subjects) },
+          'aria-label': `${C.WEEKDAYS[j][1]} ${C.ordinal(i)} ora`, onclick: () => onCell(w, i) }, cellName(c, subjects) || '+'));
+      });
+    } else {
+      C.ttBlocks(tt, w).forEach(b => kids.push(h('div', { class: 'tt-c', style: { gridColumn: j + 2, gridRow: `${b.from + 2} / ${b.to + 3}`, '--c': cellColor(b.cell, subjects) },
+        title: b.cell.n || null }, cellName(b.cell, subjects))));
+    }
+  });
+  return h('div', { class: 'tt-grid', style: { gridTemplateRows: `auto repeat(${hours.length}, minmax(46px, auto))` } }, kids);
+}
+
+/* Lezioni del giorno selezionato. marks = { idMateria: 'Interrogazione' } per evidenziare le righe. */
+export function daySchedule(tt, date, subjects, { marks = {}, onWeek = null } = {}) {
+  const blocks = C.ttBlocks(tt, C.weekdayOf(date));
+  if (!blocks.length) return null;
+  return h('div', { class: 'tt-day' },
+    h('div', { class: 'day-title' }, h('h2', {}, 'Orario'),
+      onWeek ? h('button', { class: 'btn sm ghost', onclick: onWeek }, 'Settimana intera') : null),
+    blocks.map(b => h('div', { class: 'tt-row', style: { '--c': cellColor(b.cell, subjects) } },
+      h('div', { class: 'tt-when' }, h('b', {}, b.from === b.to ? `${C.ordinal(b.from)} ora` : `${C.ordinal(b.from)}–${C.ordinal(b.to)}`), h('small', {}, `${b.start}–${b.end}`)),
+      h('div', { class: 'tt-bar' }),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, cellName(b.cell, subjects)), b.cell.n ? h('div', { class: 's' }, b.cell.n) : null),
+      b.cell.s && marks[b.cell.s] ? h('span', { class: 'pill dark' }, marks[b.cell.s]) : null)));
+}
+export function weekSheet(tt, subjects) {
+  const today = C.todayISO();
+  openSheet('Orario settimanale', () => tt?.hours?.length
+    ? [weekGrid(tt, subjects, { todayWd: C.isWeekend(today) ? null : C.weekdayOf(today) }),
+      h('p', { class: 'small muted', style: { marginTop: '12px' } }, `Orari: ${tt.hours[0].start}–${tt.hours[tt.hours.length - 1].end}`)]
+    : h('div', { class: 'empty' }, h('b', {}, 'Orario non ancora inserito'), 'L\'admin non ha ancora caricato l\'orario della classe.'));
 }
 
 /* ---------- Regole ---------- */

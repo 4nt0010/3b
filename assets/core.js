@@ -3,7 +3,7 @@
 
 export const DOMAIN = '3b.app';
 export const APP_NAME = '3B Interrogazioni';
-export const VERSION = 8;
+export const VERSION = 9;
 
 // Palette pastello per le materie (testo scuro leggibile su tutte)
 export const PALETTE = [
@@ -58,6 +58,34 @@ export function weekdaysOfMonth(s) {
   while (x.getMonth() === m) { const iso = toISO(x); if (!isWeekend(iso)) out.push(iso); x.setDate(x.getDate() + 1); }
   return out;
 }
+
+/* ---------- Orario settimanale ----------
+   timetable/week = { hours: [{ start: '08:00', end: '09:00' }, …], days: { '1': [cella | null, …], … '5': […] } }
+   cella = { s: idMateria } oppure { t: 'testo libero' } (es. Religione), con nota facoltativa n (es. Palestra).
+   La posizione nell'array corrisponde all'ora (0 = 1ª ora). */
+export const weekdayOf = s => String(fromISO(s).getDay());
+export const ttEmpty = c => !c || (!c.s && !c.t);
+export const sameCell = (a, b) => !ttEmpty(a) && !ttEmpty(b) && (a.s || '') === (b.s || '') && (a.t || '') === (b.t || '') && (a.n || '') === (b.n || '');
+// Lezioni di un giorno, con le ore consecutive uguali unite in un blocco (es. 2ª–3ª ora)
+export function ttBlocks(tt, wd) {
+  const hours = tt?.hours || [], row = tt?.days?.[wd] || [];
+  const out = [];
+  hours.forEach((hr, i) => {
+    const c = row[i] || null; if (ttEmpty(c)) return;
+    const last = out[out.length - 1];
+    if (last && last.to === i - 1 && sameCell(last.cell, c)) { last.to = i; last.end = hr.end; }
+    else out.push({ from: i, to: i, start: hr.start, end: hr.end, cell: c });
+  });
+  return out;
+}
+// Giorni della settimana ('1'…'5') in cui c'è lezione di una materia
+export const subjectWeekdays = (tt, sid) => WEEKDAYS.map(x => x[0])
+  .filter(wd => (tt?.days?.[wd] || []).some((c, i) => c?.s === sid && i < (tt.hours || []).length));
+export function addMinutes(hm, n) {
+  const [a, b] = (hm || '08:00').split(':').map(Number); const t = Math.max(0, Math.min(24 * 60 - 1, a * 60 + b + n));
+  return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+}
+export const ordinal = i => `${i + 1}ª`;
 
 /* ---------- Nomi utente ---------- */
 export function slug(s) {
@@ -199,5 +227,6 @@ export const RULES = [
   { t: 'Scambi', b: `<p>Puoi proporre a un compagno di scambiarvi la data, nella stessa materia. Lo scambio avviene solo se lui accetta <b>e</b> l'admin approva, e solo prima del giorno dell'interrogazione.</p>` },
   { t: 'Interrogazioni fatte', b: `<p>Dal giorno dell'interrogazione in poi, l'interrogazione risulta <b>fatta</b>: nel calendario compare come "Fatta" e finisce nell'archivio del tuo Profilo.</p><p>Da quel giorno non si può più scambiare.</p>` },
   { t: 'Da recuperare', b: `<p>Solo in casi gravi (per esempio un'assenza il giorno dell'interrogazione) l'admin può segnarti come "da recuperare" e assegnarti una nuova data.</p>` },
+  { t: 'Orario della classe', b: `<p>Nel <b>Calendario</b>, sotto gli impegni del giorno, trovi l'orario delle lezioni di quel giorno. Le materie in cui hai un'interrogazione o una verifica sono evidenziate.</p><p>Con <b>Settimana intera</b> vedi l'orario completo dal lunedì al venerdì. L'orario lo inserisce e lo aggiorna l'admin.</p>` },
   { t: 'Il tuo account', b: `<p>L'account è personale: non prestarlo e non entrare in quello di altri. Puoi cambiare la password dal Profilo.</p><p>Se dimentichi una password cambiata, l'admin dovrà ricreare l'account.</p>` },
 ];

@@ -1,19 +1,19 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential,
   EmailAuthProvider, collection, doc, onSnapshot, query, where, getDoc, setDoc, updateDoc, addDoc, serverTimestamp,
-} from './firebase.js?v=8';
-import * as C from './core.js?v=8';
+} from './firebase.js?v=9';
+import * as C from './core.js?v=9';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
   subjColor, subjName, calendar, rulesList, eventCard,
-} from './ui.js?v=8';
+} from './ui.js?v=9';
 
 const root = document.getElementById('app');
 const S = fresh();
 function fresh() {
   return {
     uid: null, me: null, students: {}, subjects: {}, evA: {}, evB: {}, rounds: {}, myVotes: {}, allVotes: {},
-    excl: {}, swapsIn: {}, swapsOut: {}, recov: {}, ready: new Set(),
+    excl: {}, swapsIn: {}, swapsOut: {}, recov: {}, tt: null, ready: new Set(),
     tab: 'cal', cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' }, rulesShown: false,
   };
 }
@@ -64,6 +64,7 @@ function start() {
   listen('swOut', query(collection(db, 'swaps'), where('fromUid', '==', uid)), q => (S.swapsOut = toMap(q)));
   listen('swIn', query(collection(db, 'swaps'), where('toUid', '==', uid)), q => (S.swapsIn = toMap(q)));
   listen('recov', query(collection(db, 'recoveries'), where('uid', '==', uid)), q => (S.recov = toMap(q)));
+  listen('tt', doc(db, 'timetable', 'week'), s => (S.tt = s.exists() ? s.data() : null));
 }
 function syncRoundSubs() {
   const want = {};
@@ -120,7 +121,7 @@ function renderCal(main) {
   ];
   const { hero, body } = calendar({
     state: S.cal, events: events(), students: S.students, subjects: S.subjects, me: S.uid,
-    onChange: render, onEventClick: eventSheet, extraBody: banners.length ? h('div', {}, banners) : null,
+    onChange: render, onEventClick: eventSheet, extraBody: banners.length ? h('div', {}, banners) : null, timetable: S.tt,
   });
   page(main, hero, body);
 }
