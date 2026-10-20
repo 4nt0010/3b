@@ -87,7 +87,7 @@ service cloud.firestore {
         match /votes/{vid} {
           allow get: if isAdmin() || (inClass(cid) && (vid == me() || round().showVotes == true));
           allow list: if isAdmin() || (inClass(cid) && round().showVotes == true);
-          allow create, update: if inClass(cid) && vid == me() && canVote() && validVote();
+          allow create, update: if isAdmin() || (inClass(cid) && vid == me() && canVote() && validVote());
           allow delete: if isAdmin();
         }
       }
@@ -107,10 +107,10 @@ service cloud.firestore {
       match /swaps/{id} {
         allow read: if isAdmin()
           || (inClass(cid) && (resource.data.fromUid == me() || resource.data.toUid == me()));
-        allow create: if inClass(cid)
+        allow create: if isAdmin() || (inClass(cid)
           && request.resource.data.fromUid == me()
           && request.resource.data.toUid != me()
-          && request.resource.data.status == 'pending_peer';
+          && request.resource.data.status == 'pending_peer');
         allow update: if isAdmin()
           || (inClass(cid) && resource.data.toUid == me() && resource.data.status == 'pending_peer'
               && request.resource.data.status in ['pending_admin', 'declined'] && onlyChanged(['status', 'updatedAt']))
@@ -122,13 +122,13 @@ service cloud.firestore {
       // Richieste di sblocco di una giornata: le fa lo studente, decide l'admin
       match /unlockRequests/{id} {
         allow read: if isAdmin() || (inClass(cid) && resource.data.uid == me());
-        allow create: if inClass(cid)
+        allow create: if isAdmin() || (inClass(cid)
           && request.resource.data.keys().hasOnly(['uid', 'roundId', 'date', 'note', 'status', 'createdAt'])
           && request.resource.data.uid == me()
           && request.resource.data.status == 'pending'
           && request.resource.data.roundId is string
           && request.resource.data.date is string
-          && request.resource.data.note is string && request.resource.data.note.size() <= 300;
+          && request.resource.data.note is string && request.resource.data.note.size() <= 300);
         allow update: if isAdmin()
           || (inClass(cid) && resource.data.uid == me() && resource.data.status == 'pending'
               && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));

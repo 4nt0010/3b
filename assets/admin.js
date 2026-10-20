@@ -1042,7 +1042,6 @@ function renderNoClass() {
       A.legacy && !migrated() ? [
         h('label', { class: 'field' }, h('span', {}, 'Nome della classe dei dati esistenti'), (name.value = '3B', name)),
         h('button', { class: 'btn block lime', onclick: e => migrateLegacy(name.value, e.currentTarget) }, 'Sposta i dati nella classe'),
-        h('p', { class: 'small muted', style: { marginTop: '10px' } }, 'Prima di farlo, pubblica le nuove regole di sicurezza (file firestore.rules), altrimenti l\'operazione non è permessa.'),
       ] : [
         h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), name),
         h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => createClass(name.value), 'Classe creata').catch(() => {}) }, 'Crea classe'),
