@@ -1,19 +1,23 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential,
   EmailAuthProvider, collection, doc, onSnapshot, query, where, getDoc, setDoc, updateDoc, addDoc, serverTimestamp,
-} from './firebase.js?v=9';
-import * as C from './core.js?v=9';
+} from './firebase.js?v=10';
+import * as C from './core.js?v=10';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
-  subjColor, subjName, calendar, rulesList, eventCard,
-} from './ui.js?v=9';
+  subjColor, subjName, calendar, rulesList, eventCard, drawReveal, store, mark,
+} from './ui.js?v=10';
 
 const root = document.getElementById('app');
+// Tutti i dati della classe stanno in classes/{cid}/…
+let CID = null;
+const cref = (...p) => collection(db, 'classes', CID, ...p);
+const dref = (...p) => doc(db, 'classes', CID, ...p);
 const S = fresh();
 function fresh() {
   return {
-    uid: null, me: null, students: {}, subjects: {}, evA: {}, evB: {}, rounds: {}, myVotes: {}, allVotes: {},
-    excl: {}, swapsIn: {}, swapsOut: {}, recov: {}, tt: null, ready: new Set(),
+    uid: null, me: null, klass: null, students: {}, subjects: {}, evA: {}, evB: {}, rounds: {}, myVotes: {}, allVotes: {},
+    excl: {}, swapsIn: {}, swapsOut: {}, recov: {}, tt: null, ttChanges: null, unlockReqs: {}, ready: new Set(),
     tab: 'cal', cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' }, rulesShown: false,
   };
 }
@@ -26,9 +30,12 @@ onAuthStateChanged(auth, async user => {
   if (!user) return showLogin();
   S.uid = user.uid;
   try {
-    const snap = await getDoc(doc(db, 'students', user.uid));
+    const m = await getDoc(doc(db, 'members', user.uid));
+    if (!m.exists() || !m.data().classId) return notStudent();
+    CID = m.data().classId;
+    const [snap, k] = await Promise.all([getDoc(dref('students', user.uid)), getDoc(doc(db, 'classes', CID))]);
     if (!snap.exists()) return notStudent();
-    S.me = snap.data();
+    S.me = snap.data(); S.klass = k.exists() ? { id: k.id, ...k.data() } : { id: CID, name: '' };
   } catch (e) { console.error(e); toast(errMsg(e), 'error'); return notStudent(); }
   start();
 });
@@ -40,8 +47,8 @@ function showLogin() {
 }
 function notStudent() {
   root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' },
-    h('div', { class: 'logo' }, '3B'), h('h1', {}, 'Account non studente'),
-    h('p', { class: 'sub' }, 'Questo account non è registrato come studente della classe. Se sei l\'admin, usa il pannello admin.'),
+    h('div', { class: 'logo' }, mark(34)), h('h1', {}, 'Account non studente'),
+    h('p', { class: 'sub' }, 'Questo account non è collegato a nessuna classe. Se sei l\'admin, usa il pannello admin; altrimenti avvisa l\'admin.'),
     h('div', { class: 'actions', style: { display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '20px' } },
       h('a', { class: 'btn block', href: './admin/' }, 'Vai al pannello admin'),
       h('button', { class: 'btn block line', onclick: () => signOut(auth) }, 'Esci')))));
@@ -54,24 +61,27 @@ function listen(key, ref, fn) {
 const toMap = q => { const m = {}; q.forEach(d => (m[d.id] = { id: d.id, ...d.data() })); return m; };
 function start() {
   const uid = S.uid;
-  listen('me', doc(db, 'students', uid), s => { if (s.exists()) S.me = s.data(); });
-  listen('students', collection(db, 'students'), q => { S.students = {}; q.forEach(d => (S.students[d.id] = d.data())); });
-  listen('subjects', collection(db, 'subjects'), q => (S.subjects = toMap(q)));
-  listen('evA', query(collection(db, 'events'), where('type', '==', 'interrogazione')), q => (S.evA = toMap(q)));
-  listen('evB', query(collection(db, 'events'), where('studentIds', 'array-contains', uid)), q => (S.evB = toMap(q)));
-  listen('rounds', query(collection(db, 'rounds'), where('visible', '==', true)), q => { S.rounds = toMap(q); syncRoundSubs(); });
-  listen('excl', doc(db, 'exclusions', uid), s => (S.excl = s.exists() ? s.data() : {}));
-  listen('swOut', query(collection(db, 'swaps'), where('fromUid', '==', uid)), q => (S.swapsOut = toMap(q)));
-  listen('swIn', query(collection(db, 'swaps'), where('toUid', '==', uid)), q => (S.swapsIn = toMap(q)));
-  listen('recov', query(collection(db, 'recoveries'), where('uid', '==', uid)), q => (S.recov = toMap(q)));
-  listen('tt', doc(db, 'timetable', 'week'), s => (S.tt = s.exists() ? s.data() : null));
+  listen('me', dref('students', uid), s => { if (s.exists()) S.me = s.data(); });
+  listen('students', cref('students'), q => { S.students = {}; q.forEach(d => (S.students[d.id] = d.data())); });
+  listen('subjects', cref('subjects'), q => (S.subjects = toMap(q)));
+  listen('evA', query(cref('events'), where('type', '==', 'interrogazione')), q => (S.evA = toMap(q)));
+  listen('evB', query(cref('events'), where('studentIds', 'array-contains', uid)), q => (S.evB = toMap(q)));
+  listen('rounds', query(cref('rounds'), where('visible', '==', true)), q => { S.rounds = toMap(q); syncRoundSubs(); });
+  listen('excl', dref('exclusions', uid), s => (S.excl = s.exists() ? s.data() : {}));
+  listen('swOut', query(cref('swaps'), where('fromUid', '==', uid)), q => (S.swapsOut = toMap(q)));
+  listen('swIn', query(cref('swaps'), where('toUid', '==', uid)), q => (S.swapsIn = toMap(q)));
+  listen('recov', query(cref('recoveries'), where('uid', '==', uid)), q => (S.recov = toMap(q)));
+  listen('tt', dref('timetable', 'week'), s => (S.tt = s.exists() ? s.data() : null));
+  listen('ttc', dref('timetable', 'changes'), s => (S.ttChanges = s.exists() ? s.data() : null));
+  listen('unlock', query(cref('unlockRequests'), where('uid', '==', uid)), q => (S.unlockReqs = toMap(q)));
+  listen('klass', doc(db, 'classes', CID), s => { if (s.exists()) S.klass = { id: s.id, ...s.data() }; });
 }
 function syncRoundSubs() {
   const want = {};
   for (const r of Object.values(S.rounds)) {
     if (r.status === 'archived') continue;
-    want[r.id + ':mine'] = () => onSnapshot(doc(db, 'rounds', r.id, 'votes', S.uid), s => { S.myVotes[r.id] = s.exists() ? s.data() : null; schedule(); }, e => console.error(e));
-    if (r.showVotes) want[r.id + ':all'] = () => onSnapshot(collection(db, 'rounds', r.id, 'votes'), q => { S.allVotes[r.id] = toMap(q); schedule(); }, e => console.error(e));
+    want[r.id + ':mine'] = () => onSnapshot(dref('rounds', r.id, 'votes', S.uid), s => { S.myVotes[r.id] = s.exists() ? s.data() : null; schedule(); }, e => console.error(e));
+    if (r.showVotes) want[r.id + ':all'] = () => onSnapshot(cref('rounds', r.id, 'votes'), q => { S.allVotes[r.id] = toMap(q); schedule(); }, e => console.error(e));
   }
   for (const k of Object.keys(roundSubs)) if (!want[k]) { roundSubs[k](); delete roundSubs[k]; if (k.endsWith(':all')) delete S.allVotes[k.split(':')[0]]; }
   for (const [k, f] of Object.entries(want)) if (!roundSubs[k]) roundSubs[k] = f();
@@ -103,10 +113,36 @@ function render() {
     swap: Object.values(S.swapsIn).filter(s => s.status === 'pending_peer' && C.swappable(S.evA[s.fromEventId] || S.evB[s.fromEventId]) && C.swappable(S.evA[s.toEventId] || S.evB[s.toEventId])).length,
   };
   const y = window.scrollY;
-  const main = shell(root, TABS, S.tab, t => { S.tab = t; window.scrollTo(0, 0); render(); }, badges);
+  const main = shell(root, TABS, S.tab, t => { S.tab = t; window.scrollTo(0, 0); render(); }, badges, S.klass?.name || null);
   ({ cal: renderCal, vote: renderVote, swap: renderSwap, info: renderInfo, me: renderMe })[S.tab](main);
   window.scrollTo(0, y);
   if (S.me && !S.me.rulesAccepted && !S.rulesShown) showRulesOnce();
+  else if (S.me?.rulesAccepted) checkDraws();
+}
+
+/* ---------- Rivelazione del sorteggio ----------
+   Quando l'admin pubblica un giro, gli eventi ricordano chi è stato messo lì dalla sorte (campo drawn).
+   Lo studente sorteggiato vede l'animazione una volta sola (per evento e data). */
+const seenKey = ev => `interrogo.drawSeen.${S.uid}.${ev.id}.${ev.date}`;
+let revealing = false;
+function myDrawnEvents() {
+  const today = C.todayISO();
+  return Object.values(S.evA).filter(e => !e.cancelled && e.date >= today && (e.drawn || []).includes(S.uid) && (e.studentIds || []).includes(S.uid))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+async function checkDraws() {
+  if (revealing || document.querySelector('.sheet.show')) return;
+  const todo = myDrawnEvents().filter(e => !store.get(seenKey(e)));
+  if (!todo.length) return;
+  revealing = true;
+  try {
+    for (const ev of todo) { store.set(seenKey(ev), '1'); await playReveal(ev); }
+  } finally { revealing = false; }
+}
+function playReveal(ev) {
+  const r = ev.roundId ? S.rounds[ev.roundId] : null;
+  const dates = r ? [...new Set([...(r.dates || []), ev.date])].sort() : [ev.date];
+  return drawReveal({ subject: subjName(S.subjects, ev.subjectId), color: subjColor(S.subjects, ev.subjectId), dates, target: ev.date });
 }
 
 /* ---------- Calendario ---------- */
@@ -121,7 +157,7 @@ function renderCal(main) {
   ];
   const { hero, body } = calendar({
     state: S.cal, events: events(), students: S.students, subjects: S.subjects, me: S.uid,
-    onChange: render, onEventClick: eventSheet, extraBody: banners.length ? h('div', {}, banners) : null, timetable: S.tt,
+    onChange: render, onEventClick: eventSheet, extraBody: banners.length ? h('div', {}, banners) : null, timetable: S.tt, ttChanges: S.ttChanges,
   });
   page(main, hero, body);
 }
@@ -200,8 +236,9 @@ function roundBlock(r) {
   let content;
   if (active && C.isDone(active)) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, 'Fatta ✓'),
     h('h3', { style: { fontSize: '22px', marginTop: '2px' } }, C.cap(C.fmtLong(active.date))));
-  else if (active) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, 'La tua data'),
-    h('h3', { style: { fontSize: '22px', marginTop: '2px' } }, C.cap(C.fmtLong(active.date))));
+  else if (active) content = h('div', { class: 'card', style: { background: color } }, h('div', { class: 'small', style: { fontWeight: '700', opacity: .65 } }, (active.drawn || []).includes(S.uid) ? 'La tua data · sorteggiata' : 'La tua data'),
+    h('h3', { style: { fontSize: '22px', marginTop: '2px' } }, C.cap(C.fmtLong(active.date))),
+    (active.drawn || []).includes(S.uid) ? h('button', { class: 'btn sm', style: { marginTop: '10px' }, onclick: () => playReveal(active) }, icon('dice'), 'Rivedi il sorteggio') : null);
   else if (rec) content = h('div', { class: 'card danger' }, h('h3', {}, 'Da recuperare'), h('p', { class: 'small' }, 'L\'admin ti assegnerà una nuova data.'));
   else if (mine.length) content = h('div', { class: 'card warn' }, h('h3', {}, 'Giornata annullata'), h('p', { class: 'small' }, 'Sei in attesa di una nuova data.'));
   else content = h('div', { class: 'card' }, h('p', { class: 'muted small' }, 'Non hai una data in questo giro.'));
@@ -210,13 +247,16 @@ function roundBlock(r) {
 function dateSheet(r, d, rs, past) {
   const v = S.myVotes[r.id] || {};
   const save = async (first, reserve, btn, close) => {
-    await busy(btn, () => setDoc(doc(db, 'rounds', r.id, 'votes', S.uid), { first: first || null, reserve: reserve || null, updatedAt: serverTimestamp() }), 'Scelta salvata');
+    await busy(btn, () => setDoc(dref('rounds', r.id, 'votes', S.uid), { first: first || null, reserve: reserve || null, updatedAt: serverTimestamp() }), 'Scelta salvata');
     close();
   };
   openSheet(C.cap(C.fmtLong(d)), close => {
     if (rs.length) return [
       h('div', { class: 'card' }, h('div', { class: 'row' }, icon('lock'), h('b', {}, 'Data non disponibile per te')),
         rs.map(x => h('p', { class: 'small', style: { marginTop: '8px' } }, C.reasonText(x, S.subjects)))),
+      unlockable(r, d) ? h('div', { class: 'actions' }, pendingUnlock(r.id, d)
+        ? h('div', { class: 'card violet-soft' }, h('b', {}, 'Richiesta di sblocco inviata'), h('div', { class: 'small muted' }, 'L\'admin deve ancora rispondere.'))
+        : h('button', { class: 'btn block violet', onclick: () => { close(); unlockRequestSheet(r.id, d); } }, icon('key'), 'Chiedi lo sblocco all\'admin')) : null,
       (v.first === d || v.reserve === d) ? h('div', { class: 'actions' }, h('button', { class: 'btn block danger-ghost', onclick: e =>
         save(v.first === d ? null : v.first, v.reserve === d ? null : v.reserve, e.currentTarget, close) }, 'Togli questa scelta')) : null,
     ];
@@ -260,8 +300,8 @@ function incomingCard(s) {
     rs.length && !expired ? h('div', { class: 'card danger', style: { marginTop: '10px' } }, h('b', { class: 'small' }, 'Attenzione: '), rs.map(x => h('div', { class: 'small' }, C.reasonText(x, S.subjects)))) : null,
     expired ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, h('b', { class: 'small' }, 'Scaduta: '), h('span', { class: 'small' }, 'una delle due interrogazioni è già stata fatta o è cambiata.')) : null,
     h('div', { class: 'row', style: { marginTop: '12px' } },
-      expired ? null : h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'pending_admin', updatedAt: serverTimestamp() }), 'Accettato: ora decide l\'admin') }, 'Accetta'),
-      h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'declined', updatedAt: serverTimestamp() }), 'Richiesta rifiutata') }, 'Rifiuta')));
+      expired ? null : h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(dref('swaps', s.id), { status: 'pending_admin', updatedAt: serverTimestamp() }), 'Accettato: ora decide l\'admin') }, 'Accetta'),
+      h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(dref('swaps', s.id), { status: 'declined', updatedAt: serverTimestamp() }), 'Richiesta rifiutata') }, 'Rifiuta')));
 }
 function historyCard(s) {
   const out = s.fromUid === S.uid; const other = S.students[out ? s.toUid : s.fromUid];
@@ -271,7 +311,7 @@ function historyCard(s) {
       h('div', { class: 'small muted' }, `${subjName(S.subjects, s.subjectId)} · ${C.fmtShort(out ? s.fromDate : s.toDate)} ⇄ ${C.fmtShort(out ? s.toDate : s.fromDate)}`)),
       h('span', { class: 'pill ' + cls }, label)),
     out && (s.status === 'pending_peer' || s.status === 'pending_admin') ? h('button', { class: 'btn sm line', style: { marginTop: '10px' },
-      onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'cancelled', updatedAt: serverTimestamp() }), 'Richiesta annullata') }, 'Annulla richiesta') : null);
+      onclick: e => busy(e.currentTarget, () => updateDoc(dref('swaps', s.id), { status: 'cancelled', updatedAt: serverTimestamp() }), 'Richiesta annullata') }, 'Annulla richiesta') : null);
 }
 function proposeSheet(myEvent) {
   const today = C.todayISO();
@@ -290,7 +330,7 @@ function proposeSheet(myEvent) {
           h('div', { class: 'grow' }, h('div', { class: 't' }, C.fullName(S.students[id])),
             mine.length ? h('div', { class: 's', style: { color: 'var(--danger)' } }, 'Per te: ' + mine.map(x => C.reasonText(x, S.subjects)).join('; ')) : null,
             theirs.length ? h('div', { class: 's', style: { color: 'var(--danger)' } }, 'Per lui/lei: ' + theirs.map(x => C.reasonText(x, S.subjects, false)).join('; ')) : null),
-          sent ? h('span', { class: 'pill grey' }, 'Inviata') : h('button', { class: 'btn sm', disabled: mine.length > 0, onclick: ev => busy(ev.currentTarget, () => addDoc(collection(db, 'swaps'), {
+          sent ? h('span', { class: 'pill grey' }, 'Inviata') : h('button', { class: 'btn sm', disabled: mine.length > 0, onclick: ev => busy(ev.currentTarget, () => addDoc(cref('swaps'), {
             fromUid: S.uid, toUid: id, fromEventId: myEvent.id, toEventId: e.id, fromDate: myEvent.date, toDate: e.date,
             subjectId: myEvent.subjectId, status: 'pending_peer', createdAt: serverTimestamp(),
           }), 'Richiesta inviata').then(close) }, 'Proponi'));
@@ -305,11 +345,70 @@ function renderInfo(main) {
 }
 function showRulesOnce() {
   S.rulesShown = true;
-  openSheet('Benvenuto su 3B Interrogazioni', close => [
+  openSheet('Benvenuto su ' + C.APP_NAME, close => [
     h('p', { class: 'muted', style: { marginBottom: '14px' } }, 'Prima di iniziare, leggi come funziona. Le regole restano sempre nella sezione Info.'),
     rulesList(true),
-    h('div', { class: 'actions' }, h('button', { class: 'btn block lime', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'students', S.uid), { rulesAccepted: true })).then(close) }, 'Ho letto le regole')),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block lime', onclick: e => busy(e.currentTarget, () => updateDoc(dref('students', S.uid), { rulesAccepted: true })).then(close) }, 'Ho letto le regole')),
   ]);
+}
+
+/* ---------- Richieste di sblocco ----------
+   Si può chiedere solo per le date bloccate da un'altra interrogazione vicina (le esclusioni le decide l'admin). */
+const unlockRounds = () => Object.values(S.rounds).filter(r => ['voting', 'paused', 'closed'].includes(r.status) || r.revote?.active).filter(r => inRound(r) || canVote(r));
+const roundDatesFor = r => (r.revote?.active && (r.revote.students || []).includes(S.uid) ? r.revote.dates : r.dates) || [];
+function unlockable(r, d) {
+  const rs = reasons(d, [], r);
+  const open = ['voting', 'paused', 'closed'].includes(r.status) || !!r.revote?.active;
+  return open && d >= C.todayISO() && rs.length > 0 && rs.every(x => x.kind === 'event');
+}
+const pendingUnlock = (rid, d) => Object.values(S.unlockReqs).find(x => x.roundId === rid && x.date === d && x.status === 'pending');
+const UNLOCK_STATUS = { pending: ['In attesa dell\'admin', 'violet'], approved: ['Sbloccata', 'ok'], rejected: ['Rifiutata', 'danger'], cancelled: ['Annullata', 'grey'] };
+function unlockRequestSheet(rid = null, date = null) {
+  let selR = rid, selD = date;
+  const note = h('textarea', { placeholder: 'Perché ti serve proprio quel giorno? (facoltativo)', maxlength: '300', style: { minHeight: '80px' } });
+  openSheet('Chiedi lo sblocco di una giornata', (close, refill) => {
+    const rounds = unlockRounds();
+    if (!rounds.length) return h('div', { class: 'empty' }, h('b', {}, 'Nessun giro in corso'), 'Puoi chiedere uno sblocco solo per un giro con la votazione aperta, in pausa o chiusa e non ancora pubblicata.');
+    const r = selR ? S.rounds[selR] : null;
+    const dates = r ? roundDatesFor(r).slice().sort().filter(d => unlockable(r, d)) : [];
+    return [
+      h('p', { class: 'muted small', style: { marginBottom: '12px' } }, 'Puoi chiedere di sbloccare una data che ti è bloccata perché è vicina a un\'altra tua interrogazione. L\'admin decide se accettare.'),
+      h('div', { class: 'section-title' }, '1. Giro'),
+      rounds.map(x => h('label', { class: 'radio-row' },
+        h('input', { type: 'radio', name: 'ur', checked: selR === x.id, onchange: () => { selR = x.id; selD = null; refill(); } }),
+        h('span', { class: 'sdot', style: { '--c': subjColor(S.subjects, x.subjectId) } }),
+        h('div', { class: 'grow', style: { fontWeight: '700' } }, x.title || `Interrogazioni di ${subjName(S.subjects, x.subjectId)}`))),
+      r ? [h('div', { class: 'section-title' }, '2. Data'),
+        dates.length ? dates.map(d => {
+          const sent = pendingUnlock(r.id, d);
+          return h('label', { class: 'radio-row', style: sent ? { opacity: .5 } : null },
+            h('input', { type: 'radio', name: 'ud', disabled: !!sent, checked: selD === d, onchange: () => { selD = d; } }),
+            h('div', { class: 'grow' }, h('div', { style: { fontWeight: '700' } }, C.cap(C.fmtLong(d))),
+              h('div', { class: 'small muted' }, sent ? 'Richiesta già inviata' : reasons(d, [], r).map(x => C.reasonText(x, S.subjects)).join('; '))));
+        }) : h('p', { class: 'small muted' }, 'In questo giro non hai date bloccate da altre interrogazioni.')] : null,
+      r && dates.length ? [h('div', { class: 'section-title' }, '3. Motivo'), note] : null,
+      r && dates.length ? h('div', { class: 'actions' }, h('button', { class: 'btn block violet', onclick: e => busy(e.currentTarget, async () => {
+        if (!selD) throw new Error('Scegli la data da sbloccare');
+        if (pendingUnlock(r.id, selD)) throw new Error('Hai già chiesto lo sblocco di questa data');
+        await addDoc(cref('unlockRequests'), { uid: S.uid, roundId: r.id, date: selD, note: note.value.trim().slice(0, 300), status: 'pending', createdAt: serverTimestamp() });
+      }, 'Richiesta inviata all\'admin').then(close).catch(() => {}) }, icon('key'), 'Invia la richiesta')) : null,
+    ];
+  });
+}
+function unlockSection() {
+  const list = Object.values(S.unlockReqs).sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)).slice(0, 10);
+  return [
+    h('div', { class: 'section-title' }, 'Sblocco giornate'),
+    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Ti serve una data bloccata perché vicina a un\'altra interrogazione? Chiedi all\'admin di sbloccarla per quel giro.'),
+    list.map(x => {
+      const r = S.rounds[x.roundId]; const [label, cls] = UNLOCK_STATUS[x.status] || [x.status, 'grey'];
+      return h('div', { class: 'list-item' }, h('span', { class: 'sdot', style: { '--c': subjColor(S.subjects, r?.subjectId) } }),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(x.date))), h('div', { class: 's' }, r ? (r.title || subjName(S.subjects, r.subjectId)) : 'Giro concluso')),
+        x.status === 'pending' ? h('button', { class: 'btn sm line', onclick: e => busy(e.currentTarget, () => updateDoc(dref('unlockRequests', x.id), { status: 'cancelled', updatedAt: serverTimestamp() }), 'Richiesta annullata') }, 'Annulla') : null,
+        h('span', { class: 'pill ' + cls }, label));
+    }),
+    h('button', { class: 'btn block ghost', style: { marginTop: '10px' }, onclick: () => unlockRequestSheet() }, icon('key'), 'Chiedi lo sblocco di una giornata'),
+  ];
 }
 
 /* ---------- Profilo ---------- */
@@ -320,7 +419,7 @@ function renderMe(main) {
   const nw = h('input', { type: 'password', autocomplete: 'new-password' });
   const nw2 = h('input', { type: 'password', autocomplete: 'new-password' });
   page(main, [
-    h('div', { class: 'row' }, h('span', { class: 'av lg' }, C.initials(me)), h('div', {}, h('h1', {}, C.fullName(me)), h('p', { class: 'sub' }, me?.username))),
+    h('div', { class: 'row' }, h('span', { class: 'av lg' }, C.initials(me)), h('div', {}, h('h1', {}, C.fullName(me)), h('p', { class: 'sub' }, me?.username, S.klass?.name ? ` · classe ${S.klass.name}` : ''))),
   ], [
     recs.length ? [h('div', { class: 'section-title' }, 'Da recuperare'), recs.map(r => h('div', { class: 'card danger' }, h('b', {}, subjName(S.subjects, r.subjectId)),
       h('div', { class: 'small' }, `Data originale: ${C.fmtShort(r.fromDate)} · in attesa di una nuova data`)))] : null,
@@ -332,6 +431,7 @@ function renderMe(main) {
           h('span', { class: 'pill ok' }, icon('check'), 'Fatta')))
           : h('p', { class: 'small muted' }, 'Le interrogazioni fatte compariranno qui dal giorno stesso.')];
     })(),
+    unlockSection(),
     h('div', { class: 'section-title' }, 'Cambia password'),
     h('form', { class: 'card', onsubmit: async e => {
       e.preventDefault(); const btn = e.currentTarget.querySelector('button');

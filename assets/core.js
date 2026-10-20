@@ -1,9 +1,10 @@
 // Logica condivisa: date, nomi utente, conflitti, sorteggio, regole.
 // Nessuna dipendenza da Firebase: si può testare con Node.
 
+// Il dominio degli account resta 3b.app: cambiarlo renderebbe inutilizzabili gli account già creati.
 export const DOMAIN = '3b.app';
-export const APP_NAME = '3B Interrogazioni';
-export const VERSION = 9;
+export const APP_NAME = 'Interrogo';
+export const VERSION = 10;
 
 // Palette pastello per le materie (testo scuro leggibile su tutte)
 export const PALETTE = [
@@ -67,8 +68,18 @@ export const weekdayOf = s => String(fromISO(s).getDay());
 export const ttEmpty = c => !c || (!c.s && !c.t);
 export const sameCell = (a, b) => !ttEmpty(a) && !ttEmpty(b) && (a.s || '') === (b.s || '') && (a.t || '') === (b.t || '') && (a.n || '') === (b.n || '');
 // Lezioni di un giorno, con le ore consecutive uguali unite in un blocco (es. 2ª–3ª ora)
-export function ttBlocks(tt, wd) {
-  const hours = tt?.hours || [], row = tt?.days?.[wd] || [];
+export function ttBlocks(tt, wd) { return rowBlocks(tt?.hours || [], tt?.days?.[wd] || []); }
+/* Variazioni per singola giornata: timetable/changes = { dates: { 'YYYY-MM-DD': { row: [cella | null, …], note } } }
+   Se per una data c'è una variazione, quel giorno vale la sua riga al posto di quella settimanale. */
+export const dayChange = (changes, date) => changes?.dates?.[date] || null;
+export function dayRow(tt, changes, date) {
+  const ch = dayChange(changes, date); const n = (tt?.hours || []).length;
+  const row = ch ? (ch.row || []) : (tt?.days?.[weekdayOf(date)] || []);
+  return Array.from({ length: n }, (_, i) => (ttEmpty(row[i]) ? null : row[i]));
+}
+export const dayBlocks = (tt, changes, date) => rowBlocks(tt?.hours || [], dayRow(tt, changes, date));
+export const hasLesson = (tt, changes, date, sid) => dayRow(tt, changes, date).some(c => c?.s === sid);
+export function rowBlocks(hours, row) {
   const out = [];
   hours.forEach((hr, i) => {
     const c = row[i] || null; if (ttEmpty(c)) return;
@@ -198,6 +209,27 @@ export function buildSchedule({ studentIds, dates, capacity, votes = {}, isBlock
   return { assign, how, unassigned };
 }
 
+/* drawSelected: sorteggio solo per alcuni studenti, partendo da un'ipotesi già sistemata.
+   Chi NON è selezionato resta dov'è; i selezionati vengono tolti e rimessi a sorte nei posti rimasti liberi
+   (rispettando i giorni bloccati). Con useVotes si prova prima la loro 1ª scelta e la riserva. */
+export function drawSelected({ assign = {}, how = {}, unassigned = [], selected = [], dates, capacity, prefill = {}, votes = {}, useVotes = false, isBlocked, random = Math.random }) {
+  const sel = new Set(selected);
+  const keep = {}; const pre = {};
+  dates.forEach(d => { keep[d] = (assign[d] || []).filter(u => !sel.has(u)); pre[d] = (prefill[d] || 0) + keep[d].length; });
+  const res = buildSchedule({ studentIds: [...sel], dates, capacity, prefill: pre, votes: useVotes ? votes : {}, isBlocked, random });
+  const outAssign = {}; dates.forEach(d => (outAssign[d] = [...keep[d], ...res.assign[d]]));
+  const outHow = { ...how };
+  for (const u of sel) { const x = res.how[u]; if (x === 'first' || x === 'reserve') outHow[u] = x; else if (x) outHow[u] = 'random'; else delete outHow[u]; }
+  return { assign: outAssign, how: outHow, unassigned: [...unassigned.filter(u => !sel.has(u)), ...res.unassigned] };
+}
+// Posti ancora liberi se si tolgono i selezionati
+export function freeSeats({ assign = {}, selected = [], dates, capacity, prefill = {} }) {
+  const sel = new Set(selected);
+  return dates.reduce((a, d) => a + Math.max(0, (capacity[d] ?? 0) - (prefill[d] || 0) - (assign[d] || []).filter(u => !sel.has(u)).length), 0);
+}
+// Chi è stato messo in una data dalla sorte (non per scelta propria né a mano)
+export const isDrawnHow = x => x === 'random' || x === 'novote';
+
 /* Proposta "dai voti" per la sistemazione manuale: tutti sulla prima scelta
    valida (anche oltre la capienza), altrimenti riserva, altrimenti non assegnati. */
 export function proposalFromVotes({ studentIds, dates, votes = {}, isBlocked }) {
@@ -219,14 +251,14 @@ export const HOW_LABEL = { first: '1ª scelta', reserve: 'Riserva', random: 'Sor
 export const RULES = [
   { t: 'Come funziona un giro', b: `<p>Per ogni materia l'admin crea un <b>giro di interrogazioni</b> con i giorni in cui viene il docente.</p><ol><li>L'admin apre la votazione.</li><li>Ognuno sceglie la data che preferisce.</li><li>L'admin chiude la votazione e pubblica le date definitive.</li></ol><p>Le date pubblicate compaiono nel calendario di tutti.</p>` },
   { t: 'Come si vota', b: `<p>Puoi indicare una <b>prima scelta</b> e una <b>riserva</b>. La riserva non è obbligatoria, ma ti conviene metterla: se la prima scelta è piena, passi lì invece che in un giorno a caso.</p><p>Non c'è una scadenza: puoi cambiare le tue scelte finché l'admin non chiude la votazione. L'admin può anche metterla in pausa o azzerare i voti se serve ripartire.</p>` },
-  { t: 'Date bloccate', b: `<p>Non puoi scegliere un giorno in cui hai già un'interrogazione, né il giorno prima o il giorno dopo.</p><p>Il weekend fa da pausa: se sei interrogato il <b>venerdì</b> puoi esserlo anche il <b>lunedì</b>.</p><p>Le verifiche in classe <b>non</b> bloccano nessuna data. Sotto ogni data bloccata trovi scritto il motivo.</p><p>Se vuoi comunque stare in un giorno vicino a un'altra tua interrogazione, chiedilo all'admin: può sbloccarti quella data solo per quel giro.</p><p>L'admin può escludere per te singole date (assenze, motivi personali) oppure un giorno fisso della settimana (per esempio ogni lunedì per gli studenti atleti): le vedi bloccate solo tu.</p>` },
-  { t: 'Posti limitati e sorteggio', b: `<p>Ogni giorno ha un numero massimo di posti, che non viene mostrato. Durante la votazione non si vede nemmeno quanti hanno scelto una data.</p><p>Se troppi scelgono la stessa data, si sorteggia tra chi l'ha votata. Chi resta fuori passa alla sua riserva; se anche quella è piena, viene messo in un giorno libero, sempre rispettando le sue date bloccate.</p><p>In alternativa l'admin può sistemare le date a mano mettendo d'accordo la classe.</p>` },
+  { t: 'Date bloccate', b: `<p>Non puoi scegliere un giorno in cui hai già un'interrogazione, né il giorno prima o il giorno dopo.</p><p>Il weekend fa da pausa: se sei interrogato il <b>venerdì</b> puoi esserlo anche il <b>lunedì</b>.</p><p>Le verifiche in classe <b>non</b> bloccano nessuna data. Sotto ogni data bloccata trovi scritto il motivo.</p><p>Se vuoi comunque stare in un giorno vicino a un'altra tua interrogazione, <b>chiedi lo sblocco</b> dal tuo Profilo (o toccando la data bloccata): l'admin può sbloccarti quella data solo per quel giro.</p><p>L'admin può escludere per te singole date (assenze, motivi personali) oppure un giorno fisso della settimana (per esempio ogni lunedì per gli studenti atleti): le vedi bloccate solo tu.</p>` },
+  { t: 'Posti limitati e sorteggio', b: `<p>Ogni giorno ha un numero massimo di posti, che non viene mostrato. Durante la votazione non si vede nemmeno quanti hanno scelto una data.</p><p>Se troppi scelgono la stessa data, si sorteggia tra chi l'ha votata. Chi resta fuori passa alla sua riserva; se anche quella è piena, viene messo in un giorno libero, sempre rispettando le sue date bloccate.</p><p>In alternativa l'admin può sistemare le date a mano mettendo d'accordo la classe, e sorteggiare solo chi non trova un accordo: gli altri restano dove si sono messi.</p><p>Se vieni messo in una data dalla sorte, appena apri il sito vedi l'animazione del sorteggio con la tua data.</p>` },
   { t: 'Chi non vota', b: `<p>Chi non vota viene assegnato d'ufficio a un giorno rimasto libero.</p>` },
   { t: 'Cosa vedono gli altri', b: `<p>Tutti vedono le date pubblicate di tutti nel calendario.</p><p>Le scelte di voto restano private finché l'admin non decide di renderle visibili. Le verifiche le vede solo chi le deve fare.</p>` },
   { t: 'Giornata annullata', b: `<p>Se il docente salta un giorno (sciopero, gita, assenza), l'admin annulla la giornata. Gli interrogati di quel giorno vengono spostati in un altro giorno libero oppure rivotano tra le date rimaste.</p>` },
   { t: 'Scambi', b: `<p>Puoi proporre a un compagno di scambiarvi la data, nella stessa materia. Lo scambio avviene solo se lui accetta <b>e</b> l'admin approva, e solo prima del giorno dell'interrogazione.</p>` },
   { t: 'Interrogazioni fatte', b: `<p>Dal giorno dell'interrogazione in poi, l'interrogazione risulta <b>fatta</b>: nel calendario compare come "Fatta" e finisce nell'archivio del tuo Profilo.</p><p>Da quel giorno non si può più scambiare.</p>` },
   { t: 'Da recuperare', b: `<p>Solo in casi gravi (per esempio un'assenza il giorno dell'interrogazione) l'admin può segnarti come "da recuperare" e assegnarti una nuova data.</p>` },
-  { t: 'Orario della classe', b: `<p>Nel <b>Calendario</b>, sotto gli impegni del giorno, trovi l'orario delle lezioni di quel giorno. Le materie in cui hai un'interrogazione o una verifica sono evidenziate.</p><p>Con <b>Settimana intera</b> vedi l'orario completo dal lunedì al venerdì. L'orario lo inserisce e lo aggiorna l'admin.</p>` },
+  { t: 'Orario della classe', b: `<p>Nel <b>Calendario</b>, sotto gli impegni del giorno, trovi l'orario delle lezioni di quel giorno. Le materie in cui hai un'interrogazione o una verifica sono evidenziate.</p><p>Con <b>Settimana intera</b> vedi l'orario completo dal lunedì al venerdì. L'orario lo inserisce e lo aggiorna l'admin.</p><p>Se in un giorno l'orario cambia (uscita anticipata, assemblea, cambio d'ora), l'admin inserisce una <b>variazione</b> solo per quella data: nel Calendario la riconosci dalla scritta "Orario variato".</p>` },
   { t: 'Il tuo account', b: `<p>L'account è personale: non prestarlo e non entrare in quello di altri. Puoi cambiare la password dal Profilo.</p><p>Se dimentichi una password cambiata, l'admin dovrà ricreare l'account.</p>` },
 ];

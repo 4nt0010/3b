@@ -5,7 +5,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js";
 import {
   getFirestore, collection, doc, onSnapshot, query, where, getDoc, getDocs, setDoc, updateDoc, addDoc,
-  deleteDoc, writeBatch, serverTimestamp, arrayUnion, arrayRemove, deleteField,
+  deleteDoc, writeBatch, serverTimestamp, arrayUnion, arrayRemove, deleteField, limit,
 } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-firestore.js";
 
 export const firebaseConfig = {
@@ -39,5 +39,5 @@ export async function createStudentAccount(email, password) {
 export {
   onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential, EmailAuthProvider,
   collection, doc, onSnapshot, query, where, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch,
-  serverTimestamp, arrayUnion, arrayRemove, deleteField,
+  serverTimestamp, arrayUnion, arrayRemove, deleteField, limit,
 };

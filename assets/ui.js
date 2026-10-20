@@ -1,4 +1,4 @@
-import * as C from './core.js?v=9';
+import * as C from './core.js?v=10';
 
 /* ---------- DOM helper ---------- */
 export function h(tag, attrs = {}, ...kids) {
@@ -43,6 +43,12 @@ const P = {
   dice: '<rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="9" cy="9" r="1" fill="currentColor"/><circle cx="15" cy="15" r="1" fill="currentColor"/><circle cx="15" cy="9" r="1" fill="currentColor"/><circle cx="9" cy="15" r="1" fill="currentColor"/>',
   hand: '<path d="M8 12V6.5a1.5 1.5 0 013 0V11m0-5.5a1.5 1.5 0 013 0V11m0-4a1.5 1.5 0 013 0v6.5a6.5 6.5 0 01-6.5 6.5h-.6a5.6 5.6 0 01-4.6-2.4L5 13.6a1.4 1.4 0 012.2-1.7L8 13"/>',
   palette: '<path d="M12 3.5a8.5 8.5 0 100 17c1.2 0 1.8-.8 1.8-1.7 0-1.1-.9-1.4-.9-2.4 0-.9.7-1.6 1.6-1.6H17a3.5 3.5 0 003.5-3.5C20.5 7 16.7 3.5 12 3.5z"/><circle cx="8" cy="11" r="1" fill="currentColor"/><circle cx="11" cy="7.5" r="1" fill="currentColor"/><circle cx="15.3" cy="8.3" r="1" fill="currentColor"/>',
+  school: '<path d="M3 9.5L12 5l9 4.5-9 4.5-9-4.5z"/><path d="M7 11.6v4.2c1.4 1.4 3 2.2 5 2.2s3.6-.8 5-2.2v-4.2M21 9.5v5"/>',
+  key: '<circle cx="8.5" cy="14.5" r="4"/><path d="M11.4 11.6L19 4M16 7l2.5 2.5M14 9l2 2"/>',
+  unlock: '<rect x="5.5" y="10.5" width="13" height="10" rx="3"/><path d="M8.5 10.5V8a3.5 3.5 0 016.8-1.2"/>',
+  book: '<path d="M4.5 5.5A2 2 0 016.5 3.5H19v14H6.5a2 2 0 00-2 2v-14z"/><path d="M4.5 19.5a2 2 0 002 2H19v-4"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  edit: '<path d="M4.5 19.5l1-4L15.8 5.2a2 2 0 012.9 0l.1.1a2 2 0 010 2.9L8.5 18.5l-4 1z"/><path d="M14 7l3 3"/>',
   ext: '<path d="M14 4.5h5.5V10M19.5 4.5L11 13M17 14v4a2 2 0 01-2 2H6.5a2 2 0 01-2-2V9.5a2 2 0 012-2H10"/>',
 };
 export function icon(name, extra = '') {
@@ -51,6 +57,14 @@ export function icon(name, extra = '') {
   s.setAttribute('stroke-width', '1.9'); s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
   s.setAttribute('aria-hidden', 'true'); if (extra) s.setAttribute('class', extra);
   s.innerHTML = P[name] || ''; return s;
+}
+
+/* Marchio di Interrogo: una "I" con il punto lime */
+export function mark(size = 30) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 40 40'); s.setAttribute('width', size); s.setAttribute('height', size); s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = '<rect x="13" y="15" width="9" height="20" rx="4.5" fill="currentColor"/><circle cx="17.5" cy="7.5" r="5" fill="currentColor"/><circle cx="29" cy="30.5" r="4.5" fill="#e3f86c"/>';
+  return s;
 }
 
 /* ---------- Toast ---------- */
@@ -135,14 +149,14 @@ export function renderLogin(root, { title, sub, placeholder, onSubmit, footer })
   h('label', { class: 'field' }, h('span', {}, 'Nome utente'), u),
   h('label', { class: 'field' }, h('span', {}, 'Password'), p), btn, err);
   root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' },
-    h('div', { class: 'logo' }, '3B'), h('h1', {}, title), h('p', { class: 'sub' }, sub), form, footer || null)));
+    h('div', { class: 'logo' }, mark(34)), h('h1', {}, title), h('p', { class: 'sub' }, sub), form, footer || null)));
 }
 export function renderLoader(root) { root.replaceChildren(h('div', { class: 'loader' }, h('div', { class: 'spin' }))); }
 
 /* ---------- Shell con navigazione ---------- */
-export function shell(root, tabs, current, onTab, badges = {}) {
+export function shell(root, tabs, current, onTab, badges = {}, brand = null) {
   const main = h('div', { class: 'main' });
-  const nav = h('nav', { class: 'nav' }, h('div', { class: 'brand' }, '3B'),
+  const nav = h('nav', { class: 'nav' }, h('div', { class: 'brand', title: brand || C.APP_NAME }, brand ? h('span', { class: 'brand-t' }, brand) : mark(30)),
     tabs.map(t => h('button', { class: t.id === current ? 'active' : '', 'aria-label': t.label, onclick: () => onTab(t.id) },
       icon(t.icon), h('span', {}, t.label), badges[t.id] ? h('span', { class: 'dot' }, String(badges[t.id])) : null)));
   root.replaceChildren(h('div', { class: 'app' }, main), nav);
@@ -182,7 +196,7 @@ export function eventCard(ev, { students, subjects, me, totalStudents, onClick, 
 
 /* ---------- Calendario ----------
    state: { view: 'week'|'month', sel: 'YYYY-MM-DD', filter: 'all'|'mine' } */
-export function calendar({ state, events, students, subjects, me, onChange, onEventClick, title = null, extraTop = null, extraBody = null, timetable = null }) {
+export function calendar({ state, events, students, subjects, me, onChange, onEventClick, title = null, extraTop = null, extraBody = null, timetable = null, ttChanges = null, onTTEdit = null }) {
   const today = C.todayISO();
   const visible = events.filter(e => state.filter !== 'mine' || (e.studentIds || []).includes(me));
   const byDay = {};
@@ -196,7 +210,7 @@ export function calendar({ state, events, students, subjects, me, onChange, onEv
     const mon = C.mondayOf(state.sel);
     grid = h('div', { class: 'strip' }, [0, 1, 2, 3, 4].map(i => {
       const d = C.addDays(mon, i);
-      return h('button', { class: 'day' + (d === today ? ' today' : '') + (d === state.sel ? ' sel' : ''), onclick: () => set({ sel: d }) },
+      return h('button', { class: 'day' + (d === today ? ' today' : '') + (d === state.sel ? ' sel' : '') + (C.dayChange(ttChanges, d) ? ' ttchg' : ''), onclick: () => set({ sel: d }) },
         h('small', {}, C.wd3(d)), h('b', {}, C.dnum(d)), dots(d));
     }));
   } else {
@@ -205,7 +219,7 @@ export function calendar({ state, events, students, subjects, me, onChange, onEv
     grid = h('div', { class: 'month' }, h('div', { class: 'month-grid' },
       ['Lun', 'Mar', 'Mer', 'Gio', 'Ven'].map(w => h('div', { class: 'wd' }, w)),
       Array.from({ length: lead }, () => h('div', { class: 'mday out' })),
-      days.map(d => h('button', { class: 'mday' + (d === today ? ' today' : '') + (d === state.sel ? ' sel' : ''), onclick: () => set({ sel: d }) },
+      days.map(d => h('button', { class: 'mday' + (d === today ? ' today' : '') + (d === state.sel ? ' sel' : '') + (C.dayChange(ttChanges, d) ? ' ttchg' : ''), onclick: () => set({ sel: d }) },
         C.dnum(d), dots(d)))));
   }
 
@@ -238,7 +252,7 @@ export function calendar({ state, events, students, subjects, me, onChange, onEv
       const marks = {};
       dayEv.filter(e => !e.cancelled && (!me || (e.studentIds || []).includes(me)))
         .forEach(e => { if (!marks[e.subjectId] || e.type === 'interrogazione') marks[e.subjectId] = e.type === 'verifica' ? 'Verifica' : 'Interrogazione'; });
-      return daySchedule(timetable, state.sel, subjects, { marks, onWeek: () => weekSheet(timetable, subjects) });
+      return daySchedule(timetable, state.sel, subjects, { marks, changes: ttChanges, onEdit: onTTEdit, onWeek: () => weekSheet(timetable, subjects) });
     })() : null,
   ];
   return { hero, body };
@@ -271,12 +285,17 @@ export function weekGrid(tt, subjects, { onCell = null, todayWd = null } = {}) {
 }
 
 /* Lezioni del giorno selezionato. marks = { idMateria: 'Interrogazione' } per evidenziare le righe. */
-export function daySchedule(tt, date, subjects, { marks = {}, onWeek = null } = {}) {
-  const blocks = C.ttBlocks(tt, C.weekdayOf(date));
-  if (!blocks.length) return null;
+export function daySchedule(tt, date, subjects, { marks = {}, onWeek = null, changes = null, onEdit = null } = {}) {
+  const blocks = C.dayBlocks(tt, changes, date);
+  const ch = C.dayChange(changes, date);
+  if (!blocks.length && !ch && !(onEdit && tt?.hours?.length)) return null;
   return h('div', { class: 'tt-day' },
     h('div', { class: 'day-title' }, h('h2', {}, 'Orario'),
-      onWeek ? h('button', { class: 'btn sm ghost', onclick: onWeek }, 'Settimana intera') : null),
+      h('div', { class: 'row', style: { gap: '6px' } },
+        onEdit ? h('button', { class: 'btn sm ghost', onclick: () => onEdit(date) }, icon('edit'), ch ? 'Variazione' : 'Varia') : null,
+        onWeek ? h('button', { class: 'btn sm ghost', onclick: onWeek }, 'Settimana intera') : null)),
+    ch ? h('div', { class: 'tt-change' }, icon('clock'), h('div', { class: 'grow' }, h('b', {}, 'Orario variato per questo giorno'), ch.note ? h('div', { class: 's' }, ch.note) : null)) : null,
+    !blocks.length ? h('p', { class: 'small muted', style: { padding: '6px 2px' } }, ch ? 'Nessuna lezione in questo giorno.' : 'Nessuna lezione inserita per questo giorno.') : null,
     blocks.map(b => h('div', { class: 'tt-row', style: { '--c': cellColor(b.cell, subjects) } },
       h('div', { class: 'tt-when' }, h('b', {}, b.from === b.to ? `${C.ordinal(b.from)} ora` : `${C.ordinal(b.from)}–${C.ordinal(b.to)}`), h('small', {}, `${b.start}–${b.end}`)),
       h('div', { class: 'tt-bar' }),
@@ -302,3 +321,128 @@ export function toggleRow(label, sub, on, onToggle) {
   return h('div', { class: 'toggle' }, h('div', {}, h('div', { style: { fontWeight: '700' } }, label), sub ? h('div', { class: 'muted small' }, sub) : null),
     h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(!!on), onclick: onToggle }));
 }
+
+/* =========================================================
+   ANIMAZIONI DI SORTEGGIO
+   ========================================================= */
+const reducedMotion = () => { try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
+
+/* Per l'admin (anche da proiettare in classe): i nomi girano e "cadono" uno alla volta nelle date.
+   assign = { data: [uid…] }, drawn = uid sorteggiati (gli altri compaiono già fermi), unassigned = uid rimasti senza posto. */
+export function drawShow({ title = 'Sorteggio', subtitle = '', dates, assign, drawn, unassigned = [], nameOf, dateLabel = C.fmtShort }) {
+  return new Promise(resolve => {
+    const drawnSet = new Set(drawn);
+    // nel rullo girano solo i nomi non ancora estratti
+    const pick = () => { const left = cards.flatMap(c => c.queue); return left.length ? nameOf(left[Math.floor(Math.random() * left.length)]) : ''; };
+    const cards = dates.map(d => {
+      const ids = assign[d] || [];
+      const list = h('div', { class: 'draw-names' }, ids.filter(u => !drawnSet.has(u)).map(u => h('span', { class: 'draw-n fixed' }, nameOf(u))));
+      const roll = h('div', { class: 'draw-roll' });
+      return { el: h('div', { class: 'draw-card' }, h('div', { class: 'draw-d' }, C.cap(dateLabel(d))), list, roll), list, roll, queue: ids.filter(u => drawnSet.has(u)) };
+    });
+    const lost = unassigned.filter(u => drawnSet.has(u));
+    if (lost.length) {
+      const list = h('div', { class: 'draw-names' }); const roll = h('div', { class: 'draw-roll' });
+      cards.push({ el: h('div', { class: 'draw-card lost' }, h('div', { class: 'draw-d' }, 'Senza posto'), list, roll), list, roll, queue: lost, lost: true });
+    }
+    const active = cards.filter(c => c.queue.length);
+    const total = active.reduce((a, c) => a + c.queue.length, 0);
+    const head = h('div', { class: 'draw-head' }, h('div', { class: 'draw-dice' }, icon('dice')), h('div', { class: 'grow' }, h('h2', {}, title), subtitle ? h('p', {}, subtitle) : null));
+    const status = h('p', { class: 'draw-status' }, total ? `Sorteggio di ${total} ${total === 1 ? 'studente' : 'studenti'}…` : 'Nessuno da sorteggiare');
+    const skip = h('button', { class: 'btn ghost', onclick: () => finish() }, 'Salta');
+    const done = h('button', { class: 'btn lime hidden', onclick: () => close() }, 'Chiudi');
+    const ov = h('div', { class: 'draw-ov', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('div', { class: 'draw-box' }, head, status, h('div', { class: 'draw-grid' }, cards.map(c => c.el)), h('div', { class: 'draw-foot' }, skip, done)));
+    document.body.append(ov); document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => ov.classList.add('show'));
+    active.forEach(c => c.el.classList.add('rolling'));
+
+    let spin = 0, step = 0, finished = false;
+    const drop = (c, u, animate = true) => {
+      c.list.append(h('span', { class: 'draw-n' + (c.lost ? ' lost' : '') + (animate ? ' pop' : '') }, nameOf(u)));
+      if (!c.queue.length) { c.el.classList.remove('rolling'); c.roll.textContent = ''; }
+    };
+    const finish = () => {
+      if (finished) return; finished = true; clearInterval(spin); clearTimeout(step);
+      active.forEach(c => { while (c.queue.length) drop(c, c.queue.shift(), false); });
+      status.textContent = total ? 'Sorteggio completato' : status.textContent;
+      skip.classList.add('hidden'); done.classList.remove('hidden'); ov.classList.add('finished');
+    };
+    const close = () => { finish(); ov.classList.remove('show'); setTimeout(() => { ov.remove(); document.body.style.overflow = ''; }, 250); resolve(); };
+    if (!total || reducedMotion()) { finish(); return; }
+    spin = setInterval(() => active.forEach(c => { if (c.queue.length) c.roll.textContent = pick(); }), 75);
+    const gap = Math.max(140, Math.min(600, 3600 / total));
+    let i = 0;
+    const next = () => {
+      const left = active.filter(c => c.queue.length);
+      if (!left.length) return finish();
+      const c = left[i++ % left.length];
+      drop(c, c.queue.shift());
+      step = setTimeout(next, gap);
+    };
+    step = setTimeout(next, 1100);
+  });
+}
+
+/* Per lo studente: un rullo di date che rallenta e si ferma sulla sua. */
+export function drawReveal({ subject, color = '#e3f86c', dates, target, kicker = 'Sei stato sorteggiato' }) {
+  return new Promise(resolve => {
+    const ROW = 64;
+    const pool = dates.length ? dates : [target];
+    const seq = [];
+    for (let k = 0; k < 6; k++) pool.slice().sort(() => Math.random() - .5).forEach(d => seq.push(d));
+    seq.push(target, pool[0]);
+    const reel = h('div', { class: 'reel-track' }, seq.map(d => h('div', { class: 'reel-item' }, h('small', {}, C.wd3(d)), h('b', {}, C.dnum(d)), h('small', {}, C.mon3(d)))));
+    const result = h('div', { class: 'reveal-result' },
+      h('div', { class: 'reveal-k' }, kicker),
+      h('div', { class: 'reveal-date' }, C.cap(C.fmtLong(target))),
+      h('button', { class: 'btn lime block', style: { marginTop: '18px' }, onclick: () => close() }, 'Ho capito'));
+    const confetti = h('div', { class: 'confetti' }, Array.from({ length: 22 }, (_, i) => h('i', { style: { '--x': `${Math.round(Math.random() * 240 - 120)}px`, '--y': `${Math.round(-60 - Math.random() * 140)}px`, '--r': `${Math.round(Math.random() * 360)}deg`, '--d': `${(i % 7) * 40}ms`, '--c': ['#e3f86c', '#9a8af0', '#fff', color][i % 4] } })));
+    const box = h('div', { class: 'reveal-box', style: { '--c': color } },
+      h('div', { class: 'draw-dice spin' }, icon('dice')),
+      h('div', { class: 'reveal-subj' }, h('span', { class: 'sdot', style: { '--c': color } }), 'Sorteggio · ', subject),
+      h('div', { class: 'reel' }, reel, h('div', { class: 'reel-mark' })),
+      confetti, result);
+    const ov = h('div', { class: 'draw-ov reveal', role: 'dialog', 'aria-modal': 'true', 'aria-label': kicker }, box);
+    document.body.append(ov); document.body.style.overflow = 'hidden';
+    const end = -(seq.length - 3) * ROW; // target nella riga centrale
+    const land = () => { box.classList.add('landed'); };
+    const close = () => { ov.classList.remove('show'); setTimeout(() => { ov.remove(); document.body.style.overflow = ''; }, 250); resolve(); };
+    requestAnimationFrame(() => {
+      ov.classList.add('show');
+      if (reducedMotion()) { reel.style.transform = `translateY(${end}px)`; land(); return; }
+      requestAnimationFrame(() => {
+        reel.style.transition = 'transform 3.1s cubic-bezier(.12,.72,.14,1)';
+        reel.style.transform = `translateY(${end}px)`;
+        setTimeout(land, 3150);
+      });
+    });
+  });
+}
+
+/* ---------- Guida a schede (tutorial) ----------
+   steps = [{ icon, title, html, action: { label, go } }] */
+export function stepsSheet(title, steps, { start = 0, onDone = null } = {}) {
+  let i = start;
+  return openSheet(title, (close, refill) => {
+    const st = steps[i]; const last = i === steps.length - 1;
+    return [
+      h('div', { class: 'tut' },
+        h('div', { class: 'tut-ic' }, icon(st.icon || 'info')),
+        h('div', { class: 'tut-n' }, `${i + 1} di ${steps.length}`),
+        h('h3', {}, st.title),
+        h('div', { class: 'tut-b', html: st.html }),
+        st.action ? h('button', { class: 'btn sm line', style: { marginTop: '12px' }, onclick: () => { close(); st.action.go(); } }, st.action.label, icon('right')) : null),
+      h('div', { class: 'tut-dots' }, steps.map((_, j) => h('button', { class: j === i ? 'on' : '', 'aria-label': `Passo ${j + 1}`, onclick: () => { i = j; refill(); } }))),
+      h('div', { class: 'row', style: { marginTop: '16px' } },
+        i > 0 ? h('button', { class: 'btn ghost grow', onclick: () => { i--; refill(); } }, icon('left'), 'Indietro') : h('button', { class: 'btn ghost grow', onclick: close }, 'Salta'),
+        h('button', { class: 'btn grow ' + (last ? 'lime' : ''), onclick: () => { if (last) close(); else { i++; refill(); } } }, last ? 'Ho capito' : 'Avanti', last ? null : icon('right'))),
+    ];
+  }, onDone);
+}
+
+/* localStorage protetto: in alcune modalità del browser non è disponibile */
+export const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* niente */ } },
+};

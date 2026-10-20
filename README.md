@@ -1,6 +1,6 @@
-# 3B Interrogazioni
+# Interrogo
 
-Sito per organizzare le interrogazioni programmate della classe 3B.
+Sito per organizzare le interrogazioni programmate di una o più classi.
 
 - **Studenti**: https://4nt0010.github.io/3b/
 - **Admin**: https://4nt0010.github.io/3b/admin/
@@ -12,13 +12,16 @@ index.html            sito studenti
 admin/index.html      pannello admin
 assets/
   firebase.js         configurazione Firebase
-  core.js             regole: conflitti, sorteggio, orario, testi della pagina Info
+  core.js             regole: conflitti, sorteggio, orario e variazioni, testi della pagina Info
   ui.js               componenti grafici e calendario
   student.js          app studenti
   admin.js            app admin
   style.css           stile
 manifest.webmanifest  per installarlo come app sul telefono
 firestore.rules       regole di sicurezza (da incollare in Firebase)
+
+Dati: admins/{uid}, members/{uid} = { classId, username }, classes/{cid} e dentro students, subjects,
+timetable (week, changes), events, rounds (votes, private), exclusions, recoveries, swaps, unlockRequests.
 ```
 
 ## Messa online (una volta sola)
@@ -28,13 +31,25 @@ firestore.rules       regole di sicurezza (da incollare in Firebase)
 3. **GitHub** – carica nel repository `3b` tutti i file di questa cartella mantenendo le sottocartelle (`index.html` deve stare nella radice del repository).
 4. **GitHub Pages** – nel repository: Settings → Pages → *Deploy from a branch* → branch `main`, cartella `/ (root)` → Save. Dopo un paio di minuti il sito è online.
 
-## Aggiornamento alla versione 9 (Orario)
+## Aggiornamento alla versione 10 (più classi) — da fare in quest'ordine
 
-Ricopia `firestore.rules` in Firebase Console → Firestore → Regole → *Pubblica*: senza la nuova regola `timetable` l'orario non si salva e non si vede.
+1. **Regole**: ricopia `firestore.rules` in Firebase Console → Firestore → Regole → *Pubblica*. Senza le nuove regole non funziona niente.
+2. **GitHub**: carica tutti i file (sostituisci i vecchi).
+3. **Admin**: apri `/admin/`. Compare "Aggiornamento a più classi": lascia il nome `3B` e premi *Sposta i dati nella classe*. Studenti, giri, voti, orario e calendario vengono copiati nella classe 3B. Account e password degli studenti non cambiano.
+4. Finché non hai fatto il punto 3, gli studenti vedono "Account non collegato a nessuna classe".
+5. Quando hai controllato che è tutto a posto: **Altro → Classi → Elimina i vecchi dati**.
+
+### Novità della v10
+- **Più classi**: Altro → Classi (o il pulsante "Classe …" in alto) per crearne, rinominarne e passare dall'una all'altra. Ogni classe ha studenti, materie, orario e giri suoi. Creando una classe puoi copiare materie e orario da quella aperta. Classi e account si creano solo dal pannello admin; i nomi utente restano unici tra tutte le classi.
+- **Guida per l'admin**: si apre da sola al primo accesso, poi da Altro → Guida per l'admin.
+- **Variazioni d'orario di una singola giornata**: Calendario → giorno → *Varia* sopra l'orario (oppure Altro → Orario settimanale → Variazioni). Ore modificabili una per una, "uscita anticipata", "nessuna lezione", nota per la classe, ripristino.
+- **Sorteggio solo per alcuni**: nell'ipotesi, *Sorteggia solo alcuni studenti* → selezioni chi non ha trovato un accordo; gli altri restano fermi. Opzione per tenere conto dei loro voti.
+- **Animazione del sorteggio**: lato admin (proiettabile in classe) e lato studente: chi è stato sorteggiato, aprendo il sito, vede il rullo fermarsi sulla sua data (una volta; poi "Rivedi il sorteggio" in Vota).
+- **Richiesta di sblocco**: dal Profilo (o toccando una data bloccata) lo studente chiede di sbloccare una data vicina a un'altra sua interrogazione; l'admin la approva in Richieste.
 
 ## Primo avvio (admin)
 
-1. Apri `/3b/admin/` e accedi con l'email dell'account admin creato in Firebase (se è `admin@3b.app` basta scrivere `admin`).
+1. Apri `/3b/admin/` e accedi con l'email dell'account admin creato in Firebase (se è `admin@3b.app` basta scrivere `admin`). Crea la prima classe (o sposta i dati esistenti, vedi sopra). Tutto quello che segue vale per la classe aperta.
 2. **Altro → Materie**: crea le materie e scegli un colore per ognuna.
 3. **Studenti → +**: incolla l'elenco della classe, un nome per riga (`Nome Cognome`; per nomi o cognomi composti usa la virgola: `Maria Grazia, De Luca`). Il sito crea gli account: nome utente `nome.cognome`, password iniziale uguale al nome utente.
 4. **Giri → +**: crea un giro con materia, giorni in cui viene il docente, posti per giorno e chi partecipa (di default tutta la classe). Poi *Apri votazione*.

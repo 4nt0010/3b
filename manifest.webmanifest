@@ -1,7 +1,7 @@
 {
-  "name": "3B Interrogazioni",
-  "short_name": "3B",
-  "description": "Interrogazioni programmate della classe 3B",
+  "name": "Interrogo",
+  "short_name": "Interrogo",
+  "description": "Interrogazioni programmate della tua classe",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

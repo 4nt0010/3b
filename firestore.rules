@@ -1,5 +1,5 @@
 rules_version = '2';
-// Regole di sicurezza per 3B Interrogazioni.
+// Regole di sicurezza per Interrogo (più classi).
 // Da incollare in Firebase Console → Firestore Database → Regole → Pubblica.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -8,6 +8,12 @@ service cloud.firestore {
     function me() { return request.auth.uid; }
     function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
     function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+    // Lo studente appartiene alla classe cid (members/{uid}.classId)
+    function inClass(cid) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/members/$(request.auth.uid)).data.classId == cid;
+    }
 
     // Ruolo admin: ognuno può solo controllare se stesso. Si modifica solo dalla console.
     match /admins/{id} {
@@ -15,91 +21,129 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
-    // Anagrafica studenti: visibile a tutti gli iscritti (serve per i nomi nel calendario).
-    // Lo studente può solo segnare di aver letto le regole.
-    match /students/{id} {
-      allow read: if signedIn();
-      allow create, delete: if isAdmin();
-      allow update: if isAdmin()
-        || (signedIn() && id == me() && onlyChanged(['rulesAccepted']) && request.resource.data.rulesAccepted == true);
+    // A quale classe appartiene ogni account studente. Lo gestisce solo l'admin.
+    match /members/{uid} {
+      allow get: if isAdmin() || (signedIn() && uid == me());
+      allow list, write: if isAdmin();
     }
 
-    match /subjects/{id} {
-      allow read: if signedIn();
+    match /classes/{cid} {
+      // Le classi le crea, rinomina ed elimina solo l'admin
+      allow read: if isAdmin() || inClass(cid);
       allow write: if isAdmin();
-    }
 
-    // Orario settimanale della classe: lo leggono tutti, lo modifica solo l'admin
-    match /timetable/{id} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
-    }
-
-    // Interrogazioni: visibili a tutti. Verifiche: solo agli studenti assegnati.
-    match /events/{id} {
-      allow read: if isAdmin()
-        || (signedIn() && (resource.data.type == 'interrogazione' || me() in resource.data.studentIds));
-      allow write: if isAdmin();
-    }
-
-    match /rounds/{rid} {
-      function round() { return get(/databases/$(database)/documents/rounds/$(rid)).data; }
-      function canVote() {
-        return (round().status == 'voting'
-                && (round().get('participants', null) == null || me() in round().get('participants', [])))
-          || (round().get('revote', {}).get('active', false) == true && me() in round().get('revote', {}).get('students', []));
-      }
-      function validVote() {
-        let d = request.resource.data;
-        return d.keys().hasOnly(['first', 'reserve', 'updatedAt'])
-          && (d.first == null || (d.first is string && d.first in round().dates))
-          && (d.reserve == null || (d.reserve is string && d.reserve in round().dates))
-          && (d.first == null || d.first != d.reserve);
+      // Anagrafica studenti: visibile ai compagni (serve per i nomi nel calendario).
+      // Lo studente può solo segnare di aver letto le regole.
+      match /students/{id} {
+        allow read: if isAdmin() || inClass(cid);
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin()
+          || (inClass(cid) && id == me() && onlyChanged(['rulesAccepted']) && request.resource.data.rulesAccepted == true);
       }
 
-      // Le bozze le vede solo l'admin
-      allow read: if isAdmin() || (signedIn() && resource.data.visible == true);
-      allow write: if isAdmin();
-
-      // Capienza e ipotesi di sorteggio: SOLO admin
-      match /private/{docId} {
-        allow read, write: if isAdmin();
+      match /subjects/{id} {
+        allow read: if isAdmin() || inClass(cid);
+        allow write: if isAdmin();
       }
 
-      // Voti: ognuno vede il proprio; gli altri solo se l'admin attiva "Mostra voti"
-      match /votes/{vid} {
-        allow get: if isAdmin() || (signedIn() && (vid == me() || round().showVotes == true));
-        allow list: if isAdmin() || (signedIn() && round().showVotes == true);
-        allow create, update: if signedIn() && vid == me() && canVote() && validVote();
+      // Orario settimanale (week) e variazioni di singole giornate (changes)
+      match /timetable/{id} {
+        allow read: if isAdmin() || inClass(cid);
+        allow write: if isAdmin();
+      }
+
+      // Interrogazioni: visibili a tutta la classe. Verifiche: solo agli studenti assegnati.
+      match /events/{id} {
+        allow read: if isAdmin()
+          || (inClass(cid) && (resource.data.type == 'interrogazione' || me() in resource.data.studentIds));
+        allow write: if isAdmin();
+      }
+
+      match /rounds/{rid} {
+        function round() { return get(/databases/$(database)/documents/classes/$(cid)/rounds/$(rid)).data; }
+        function canVote() {
+          return (round().status == 'voting'
+                  && (round().get('participants', null) == null || me() in round().get('participants', [])))
+            || (round().get('revote', {}).get('active', false) == true && me() in round().get('revote', {}).get('students', []));
+        }
+        function validVote() {
+          let d = request.resource.data;
+          return d.keys().hasOnly(['first', 'reserve', 'updatedAt'])
+            && (d.first == null || (d.first is string && d.first in round().dates))
+            && (d.reserve == null || (d.reserve is string && d.reserve in round().dates))
+            && (d.first == null || d.first != d.reserve);
+        }
+
+        // Le bozze le vede solo l'admin
+        allow read: if isAdmin() || (inClass(cid) && resource.data.visible == true);
+        allow write: if isAdmin();
+
+        // Capienza e ipotesi di sorteggio: SOLO admin
+        match /private/{docId} {
+          allow read, write: if isAdmin();
+        }
+
+        // Voti: ognuno vede il proprio; gli altri solo se l'admin attiva "Mostra voti"
+        match /votes/{vid} {
+          allow get: if isAdmin() || (inClass(cid) && (vid == me() || round().showVotes == true));
+          allow list: if isAdmin() || (inClass(cid) && round().showVotes == true);
+          allow create, update: if inClass(cid) && vid == me() && canVote() && validVote();
+          allow delete: if isAdmin();
+        }
+      }
+
+      // Giorni esclusi: li vede solo lo studente interessato
+      match /exclusions/{sid} {
+        allow read: if isAdmin() || (inClass(cid) && sid == me());
+        allow write: if isAdmin();
+      }
+
+      match /recoveries/{id} {
+        allow read: if isAdmin() || (inClass(cid) && resource.data.uid == me());
+        allow write: if isAdmin();
+      }
+
+      // Scambi: proposti da A, accettati da B, approvati dall'admin
+      match /swaps/{id} {
+        allow read: if isAdmin()
+          || (inClass(cid) && (resource.data.fromUid == me() || resource.data.toUid == me()));
+        allow create: if inClass(cid)
+          && request.resource.data.fromUid == me()
+          && request.resource.data.toUid != me()
+          && request.resource.data.status == 'pending_peer';
+        allow update: if isAdmin()
+          || (inClass(cid) && resource.data.toUid == me() && resource.data.status == 'pending_peer'
+              && request.resource.data.status in ['pending_admin', 'declined'] && onlyChanged(['status', 'updatedAt']))
+          || (inClass(cid) && resource.data.fromUid == me() && resource.data.status in ['pending_peer', 'pending_admin']
+              && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));
+        allow delete: if isAdmin();
+      }
+
+      // Richieste di sblocco di una giornata: le fa lo studente, decide l'admin
+      match /unlockRequests/{id} {
+        allow read: if isAdmin() || (inClass(cid) && resource.data.uid == me());
+        allow create: if inClass(cid)
+          && request.resource.data.keys().hasOnly(['uid', 'roundId', 'date', 'note', 'status', 'createdAt'])
+          && request.resource.data.uid == me()
+          && request.resource.data.status == 'pending'
+          && request.resource.data.roundId is string
+          && request.resource.data.date is string
+          && request.resource.data.note is string && request.resource.data.note.size() <= 300;
+        allow update: if isAdmin()
+          || (inClass(cid) && resource.data.uid == me() && resource.data.status == 'pending'
+              && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));
         allow delete: if isAdmin();
       }
     }
 
-    // Giorni esclusi: li vede solo lo studente interessato
-    match /exclusions/{sid} {
-      allow read: if isAdmin() || (signedIn() && sid == me());
-      allow write: if isAdmin();
+    // Dati della versione precedente (una sola classe, nella radice del database).
+    // Servono solo all'admin per importarli una volta nella nuova struttura e poi eliminarli.
+    match /{coll}/{id} {
+      allow read, delete: if isAdmin()
+        && coll in ['students', 'subjects', 'timetable', 'events', 'rounds', 'exclusions', 'recoveries', 'swaps'];
     }
-
-    match /recoveries/{id} {
-      allow read: if isAdmin() || (signedIn() && resource.data.uid == me());
-      allow write: if isAdmin();
-    }
-
-    // Scambi: proposti da A, accettati da B, approvati dall'admin
-    match /swaps/{id} {
-      allow read: if isAdmin()
-        || (signedIn() && (resource.data.fromUid == me() || resource.data.toUid == me()));
-      allow create: if signedIn()
-        && request.resource.data.fromUid == me()
-        && request.resource.data.toUid != me()
-        && request.resource.data.status == 'pending_peer';
-      allow update: if isAdmin()
-        || (signedIn() && resource.data.toUid == me() && resource.data.status == 'pending_peer'
-            && request.resource.data.status in ['pending_admin', 'declined'] && onlyChanged(['status', 'updatedAt']))
-        || (signedIn() && resource.data.fromUid == me() && resource.data.status in ['pending_peer', 'pending_admin']
-            && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));
-      allow delete: if isAdmin();
+    match /rounds/{rid}/{sub}/{id} {
+      allow read, delete: if isAdmin();
     }
   }
 }

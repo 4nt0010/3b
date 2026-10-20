@@ -1,23 +1,35 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
   collection, doc, onSnapshot, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
-} from './firebase.js?v=9';
-import * as C from './core.js?v=9';
+  arrayUnion, query, limit,
+} from './firebase.js?v=10';
+import * as C from './core.js?v=10';
 import {
   h, icon, toast, errMsg, openSheet, confirmSheet, busy, renderLogin, renderLoader, shell, page, avatar,
-  subjColor, subjName, calendar, toggleRow, weekGrid, cellName, cellColor,
-} from './ui.js?v=9';
+  subjColor, subjName, calendar, toggleRow, weekGrid, cellName, cellColor, mark, drawShow, stepsSheet, store, esc, daySchedule,
+} from './ui.js?v=10';
 
 const root = document.getElementById('app');
+// Classe su cui si sta lavorando: tutti i suoi dati stanno in classes/{cid}/…
+let CID = null;
+const cref = (...p) => collection(db, 'classes', CID, ...p);
+const dref = (...p) => doc(db, 'classes', CID, ...p);
+const CID_KEY = 'interrogo.admin.cid';
+const TUT_KEY = 'interrogo.admin.tutorial.v10';
 const A = fresh();
+function classData() {
+  return {
+    students: {}, subjects: {}, events: {}, rounds: {}, configs: {}, proposals: {}, votes: {},
+    excl: {}, swaps: {}, recov: {}, tt: null, ttChanges: null, unlockReqs: {}, ready: new Set(),
+  };
+}
 function fresh() {
   return {
-    uid: null, students: {}, subjects: {}, events: {}, rounds: {}, configs: {}, proposals: {}, votes: {},
-    excl: {}, swaps: {}, recov: {}, tt: null, ready: new Set(),
+    uid: null, classes: {}, members: {}, gready: new Set(), legacy: false, ...classData(),
     tab: 'giri', roundId: null, more: null, ttDay: C.isWeekend(C.todayISO()) ? '1' : C.weekdayOf(C.todayISO()), cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' },
   };
 }
-let unsubs = [], roundSubs = {};
+let unsubs = [], classUnsubs = [], roundSubs = {};
 
 /* ---------- Auth ---------- */
 renderLoader(root);
@@ -32,13 +44,13 @@ onAuthStateChanged(auth, async user => {
 });
 function showLogin() {
   renderLogin(root, {
-    title: 'Pannello admin', sub: C.APP_NAME + ' · gestione della classe', placeholder: 'admin',
+    title: 'Pannello admin', sub: C.APP_NAME + ' · gestione delle classi', placeholder: 'admin',
     onSubmit: (u, p) => signInWithEmailAndPassword(auth, C.emailOf(u), p),
     footer: h('a', { href: '../', class: 'small', style: { display: 'block', textAlign: 'center', marginTop: '14px', color: 'rgba(19,19,23,.6)', fontWeight: '700' } }, 'Vai al sito studenti'),
   });
 }
 function notAdmin() {
-  root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' }, h('div', { class: 'logo' }, '3B'),
+  root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' }, h('div', { class: 'logo' }, mark(34)),
     h('h1', {}, 'Accesso negato'), h('p', { class: 'sub' }, 'Questo account non ha i permessi da admin.'),
     h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '20px' } },
       h('a', { class: 'btn block', href: '../' }, 'Vai al sito studenti'),
@@ -47,31 +59,58 @@ function notAdmin() {
 
 /* ---------- Dati ---------- */
 const toMap = q => { const m = {}; q.forEach(d => (m[d.id] = { id: d.id, ...d.data() })); return m; };
-function listen(key, ref, fn) {
-  unsubs.push(onSnapshot(ref, s => { fn(s); A.ready.add(key); schedule(); }, e => { console.error(key, e); toast(errMsg(e), 'error'); A.ready.add(key); schedule(); }));
+function listen(key, ref, fn, list = classUnsubs, ready = () => A.ready) {
+  const cid = CID;
+  list.push(onSnapshot(ref, s => { if (list === classUnsubs && cid !== CID) return; fn(s); ready().add(key); schedule(); },
+    e => { console.error(key, e); if (!/unlockRequests|ttc/.test(key)) toast(errMsg(e), 'error'); ready().add(key); schedule(); }));
 }
+const CLASS_KEYS = 10;
 function start() {
-  listen('students', collection(db, 'students'), q => { A.students = {}; q.forEach(d => (A.students[d.id] = d.data())); });
-  listen('subjects', collection(db, 'subjects'), q => (A.subjects = toMap(q)));
-  listen('events', collection(db, 'events'), q => (A.events = toMap(q)));
-  listen('rounds', collection(db, 'rounds'), q => { A.rounds = toMap(q); syncRoundSubs(); });
-  listen('excl', collection(db, 'exclusions'), q => { A.excl = {}; q.forEach(d => (A.excl[d.id] = d.data())); });
-  listen('swaps', collection(db, 'swaps'), q => (A.swaps = toMap(q)));
-  listen('recov', collection(db, 'recoveries'), q => (A.recov = toMap(q)));
-  listen('tt', doc(db, 'timetable', 'week'), s => (A.tt = s.exists() ? s.data() : null));
+  const g = () => A.gready;
+  listen('classes', collection(db, 'classes'), q => {
+    A.classes = toMap(q);
+    if (CID && !A.classes[CID]) selectClass(null);
+    if (!CID) { const saved = store.get(CID_KEY); const ids = sortedClasses().map(c => c.id); const pick = ids.includes(saved) ? saved : ids[0]; if (pick) selectClass(pick); }
+  }, unsubs, g);
+  listen('members', collection(db, 'members'), q => { A.members = {}; q.forEach(d => (A.members[d.id] = d.data())); }, unsubs, g);
+  checkLegacy();
 }
+async function checkLegacy() {
+  try { A.legacy = !(await getDocs(query(collection(db, 'students'), limit(1)))).empty; } catch (e) { A.legacy = false; }
+  schedule();
+}
+function selectClass(cid) {
+  classUnsubs.forEach(u => u()); classUnsubs = []; Object.values(roundSubs).forEach(u => u()); roundSubs = {};
+  Object.assign(A, classData(), { roundId: null });
+  CID = cid; if (cid) store.set(CID_KEY, cid);
+  if (!cid) return schedule();
+  listen('students', cref('students'), q => { A.students = {}; q.forEach(d => (A.students[d.id] = d.data())); });
+  listen('subjects', cref('subjects'), q => (A.subjects = toMap(q)));
+  listen('events', cref('events'), q => (A.events = toMap(q)));
+  listen('rounds', cref('rounds'), q => { A.rounds = toMap(q); syncRoundSubs(); });
+  listen('excl', cref('exclusions'), q => { A.excl = {}; q.forEach(d => (A.excl[d.id] = d.data())); });
+  listen('swaps', cref('swaps'), q => (A.swaps = toMap(q)));
+  listen('recov', cref('recoveries'), q => (A.recov = toMap(q)));
+  listen('tt', dref('timetable', 'week'), s => (A.tt = s.exists() ? s.data() : null));
+  listen('ttc', dref('timetable', 'changes'), s => (A.ttChanges = s.exists() ? s.data() : null));
+  listen('unlockRequests', cref('unlockRequests'), q => (A.unlockReqs = toMap(q)));
+  schedule();
+}
+const sortedClasses = () => Object.values(A.classes).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'it', { numeric: true }));
+const className = (cid = CID) => A.classes[cid]?.name || 'Classe';
 function syncRoundSubs() {
-  const want = {};
+  const want = {}; const cid = CID;
+  const mine = fn => (...a) => { if (cid === CID) { fn(...a); schedule(); } };
   for (const r of Object.values(A.rounds)) {
     if (r.status === 'archived') continue;
-    want[r.id + ':v'] = () => onSnapshot(collection(db, 'rounds', r.id, 'votes'), q => { A.votes[r.id] = toMap(q); schedule(); });
-    want[r.id + ':c'] = () => onSnapshot(doc(db, 'rounds', r.id, 'private', 'config'), s => { A.configs[r.id] = s.exists() ? s.data() : { defaultCap: 0, caps: {} }; schedule(); });
-    want[r.id + ':p'] = () => onSnapshot(doc(db, 'rounds', r.id, 'private', 'proposal'), s => { A.proposals[r.id] = s.exists() ? s.data() : null; schedule(); });
+    want[r.id + ':v'] = () => onSnapshot(cref('rounds', r.id, 'votes'), mine(q => { A.votes[r.id] = toMap(q); }));
+    want[r.id + ':c'] = () => onSnapshot(dref('rounds', r.id, 'private', 'config'), mine(s => { A.configs[r.id] = s.exists() ? s.data() : { defaultCap: 0, caps: {} }; }));
+    want[r.id + ':p'] = () => onSnapshot(dref('rounds', r.id, 'private', 'proposal'), mine(s => { A.proposals[r.id] = s.exists() ? s.data() : null; }));
   }
   for (const k of Object.keys(roundSubs)) if (!want[k]) { roundSubs[k](); delete roundSubs[k]; }
   for (const [k, f] of Object.entries(want)) if (!roundSubs[k]) roundSubs[k] = f();
 }
-function stopAll() { unsubs.forEach(u => u()); unsubs = []; Object.values(roundSubs).forEach(u => u()); roundSubs = {}; }
+function stopAll() { unsubs.forEach(u => u()); unsubs = []; classUnsubs.forEach(u => u()); classUnsubs = []; Object.values(roundSubs).forEach(u => u()); roundSubs = {}; CID = null; }
 
 /* ---------- Helpers ---------- */
 const events = () => Object.values(A.events);
@@ -98,13 +137,37 @@ function render() {
   if (!A.uid) return;
   const a = document.activeElement;
   if (a && root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { a.addEventListener('blur', () => setTimeout(schedule, 400), { once: true }); return; }
-  if (A.ready.size < 8) return renderLoader(root);
-  const badges = { richieste: Object.values(A.swaps).filter(s => s.status === 'pending_admin').length + Object.values(A.recov).filter(r => r.status === 'open').length };
+  if (A.gready.size < 2) return renderLoader(root);
+  if (!CID) { clearFab(); return renderNoClass(); }
+  if (A.ready.size < CLASS_KEYS) return renderLoader(root);
+  const badges = { richieste: Object.values(A.swaps).filter(s => s.status === 'pending_admin').length + Object.values(A.recov).filter(r => r.status === 'open').length
+    + Object.values(A.unlockReqs).filter(r => r.status === 'pending').length };
   const y = window.scrollY;
-  const main = shell(root, TABS, A.tab, t => { A.tab = t; A.roundId = null; A.more = null; window.scrollTo(0, 0); render(); }, badges);
+  const main = shell(root, TABS, A.tab, t => { A.tab = t; A.roundId = null; A.more = null; window.scrollTo(0, 0); render(); }, badges, className());
   ({ giri: renderRounds, cal: renderCal, studenti: renderStudents, richieste: renderRequests, altro: renderMore })[A.tab](main);
   window.scrollTo(0, y);
+  if (!store.get(TUT_KEY) && !document.querySelector('.sheet.show, .draw-ov')) { store.set(TUT_KEY, '1'); setTimeout(() => showTutorial(), 300); }
 }
+/* Ogni pagina mostra in alto la classe su cui si sta lavorando: toccandola si cambia classe */
+function classBar() {
+  const n = Object.keys(A.classes).length;
+  return h('div', { class: 'class-bar' },
+    h('button', { class: 'class-chip', 'aria-label': 'Cambia classe', onclick: classPicker }, icon('school'), `Classe ${className()}`, n > 1 ? icon('right', 'chev') : null));
+}
+const pg = (main, hero, body) => page(main, [classBar(), hero], body);
+function classPicker() {
+  openSheet('Classi', close => [
+    h('p', { class: 'small muted', style: { marginBottom: '6px' } }, 'Scegli la classe su cui lavorare. Ogni classe ha i suoi studenti, materie, orario e giri.'),
+    sortedClasses().map(c => h('button', { class: 'list-item', onclick: () => { close(); if (c.id !== CID) { A.tab = 'giri'; A.more = null; window.scrollTo(0, 0); selectClass(c.id); } } },
+      h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, `Classe ${c.name}`), h('div', { class: 's' }, `${membersOf(c.id).length} studenti`)),
+      c.id === CID ? h('span', { class: 'pill lime' }, 'Attuale') : icon('right', 'chev'))),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn block', onclick: () => { close(); newClassSheet(); } }, icon('plus'), 'Nuova classe'),
+      h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'altro'; A.more = 'classi'; window.scrollTo(0, 0); render(); } }, 'Gestisci le classi')),
+  ]);
+}
+const membersOf = cid => Object.entries(A.members).filter(([, m]) => m.classId === cid).map(([id]) => id);
 const fab = (label, fn) => document.body.append(h('button', { class: 'fab', 'aria-label': label, onclick: fn, 'data-fab': '1' }, icon('plus')));
 const clearFab = () => document.querySelectorAll('[data-fab]').forEach(x => x.remove());
 
@@ -117,7 +180,7 @@ function renderRounds(main) {
   const order = { voting: 0, paused: 0, closed: 1, draft: 2, published: 3, archived: 4 };
   const list = Object.values(A.rounds).sort((a, b) => (order[a.status] - order[b.status]) || ((b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)));
   const n = studentIds().length;
-  page(main, [h('h1', {}, 'Giri di interrogazioni'), h('p', { class: 'sub' }, `${n} studenti · ${Object.keys(A.subjects).length} materie`)], [
+  pg(main, [h('h1', {}, 'Giri di interrogazioni'), h('p', { class: 'sub' }, `${n} studenti · ${Object.keys(A.subjects).length} materie`)], [
     list.length ? list.map(r => {
       const rn = roundStudents(r).length; const voted = roundStudents(r).filter(id => A.votes[r.id]?.[id]?.first).length;
       const sPill = { draft: 'grey', voting: 'lime', paused: 'grey', closed: 'violet', published: 'ok', archived: 'grey' }[r.status];
@@ -182,7 +245,7 @@ function roundSheet(r = null) {
       let from = dates.length ? C.addDays(dates[dates.length - 1], 1) : C.addDays(C.todayISO(), 1);
       if (from <= C.todayISO()) from = C.addDays(C.todayISO(), 1);
       const add = [];
-      for (let i = 0; i < 7; i++) { const d = C.addDays(from, i); if (!C.isWeekend(d) && ttWd.includes(C.weekdayOf(d)) && !dates.includes(d)) add.push(d); }
+      for (let i = 0; i < 7; i++) { const d = C.addDays(from, i); if (!C.isWeekend(d) && C.hasLesson(A.tt, A.ttChanges, d, subj.value) && !dates.includes(d)) add.push(d); }
       if (!add.length) return toast('Nessun giorno trovato nell\'orario', 'error');
       add.forEach(d => (caps[d] = def())); dates = [...dates, ...add].sort(); refill();
     };
@@ -219,11 +282,11 @@ function roundSheet(r = null) {
           const data = { subjectId: subj.value, title: title.value.trim(), dates, participants: [...part] };
           const conf = { defaultCap: def(), caps: Object.fromEntries(dates.map(d => [d, caps[d] ?? def()])) };
           if (r) {
-            await updateDoc(doc(db, 'rounds', r.id), data);
-            await setDoc(doc(db, 'rounds', r.id, 'private', 'config'), conf);
+            await updateDoc(dref('rounds', r.id), data);
+            await setDoc(dref('rounds', r.id, 'private', 'config'), conf);
           } else {
-            const ref = await addDoc(collection(db, 'rounds'), { ...data, status: 'draft', visible: false, showVotes: false, createdAt: serverTimestamp() });
-            await setDoc(doc(db, 'rounds', ref.id, 'private', 'config'), conf);
+            const ref = await addDoc(cref('rounds'), { ...data, status: 'draft', visible: false, showVotes: false, createdAt: serverTimestamp() });
+            await setDoc(dref('rounds', ref.id, 'private', 'config'), conf);
             A.roundId = ref.id;
           }
         }, r ? 'Giro aggiornato' : 'Giro creato').then(close).catch(() => {}) }, r ? 'Salva modifiche' : 'Crea giro')),
@@ -240,7 +303,7 @@ function renderRound(main, r) {
   const missing = rs.filter(id => !votes[id]?.first);
   const prop = A.proposals[r.id];
   const sorted = [...(r.dates || [])].sort();
-  const upd = (data, msg) => busy(null, () => updateDoc(doc(db, 'rounds', r.id), data), msg);
+  const upd = (data, msg) => busy(null, () => updateDoc(dref('rounds', r.id), data), msg);
 
   const hero = [
     h('button', { class: 'back', onclick: () => { A.roundId = null; render(); } }, icon('left'), 'Tutti i giri'),
@@ -264,7 +327,7 @@ function renderRound(main, r) {
     h('button', { class: 'btn', onclick: async () => { if (await confirmSheet('Chiudere la votazione?', `Hanno votato ${voted.length} studenti su ${n}. Dopo la chiusura nessuno potrà più cambiare scelta (puoi sempre riaprirla).`, 'Chiudi votazione')) upd({ status: 'closed' }, 'Votazione chiusa'); } }, 'Chiudi votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica date'));
   if (r.status === 'closed') actions.append(
-    h('button', { class: 'btn ghost', onclick: async () => { await deleteDoc(doc(db, 'rounds', r.id, 'private', 'proposal')); upd({ status: 'voting' }, 'Votazione riaperta'); } }, 'Riapri votazione'),
+    h('button', { class: 'btn ghost', onclick: async () => { await deleteDoc(dref('rounds', r.id, 'private', 'proposal')); upd({ status: 'voting' }, 'Votazione riaperta'); } }, 'Riapri votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica date'));
   if (r.status === 'published') actions.append(
     h('button', { class: 'btn ghost', onclick: async () => { if (await confirmSheet('Archiviare il giro?', 'Le date restano nel calendario, ma il giro sparisce dalle votazioni.', 'Archivia')) upd({ status: 'archived', 'revote.active': false }, 'Giro archiviato'); } }, 'Archivia'));
@@ -289,14 +352,14 @@ function renderRound(main, r) {
               h('div', { class: 's' }, `1ª ${votes[id].first ? C.fmtShort(votes[id].first) : '—'} · Riserva ${votes[id].reserve ? C.fmtShort(votes[id].reserve) : '—'}`)),
             h('button', { class: 'btn sm danger-ghost', onclick: async () => {
               if (await confirmSheet('Azzerare il voto?', `Il voto di ${C.fullName(st(id))} verrà cancellato.` + (r.status === 'voting' ? ' Potrà votare di nuovo.' : ''), 'Azzera', true))
-                busy(null, () => deleteDoc(doc(db, 'rounds', r.id, 'votes', id)), 'Voto azzerato').catch(() => {});
+                busy(null, () => deleteDoc(dref('rounds', r.id, 'votes', id)), 'Voto azzerato').catch(() => {});
             } }, 'Azzera'))) : h('p', { class: 'small muted' }, 'Nessun voto.'))),
       voted.length ? h('button', { class: 'btn sm danger-ghost', style: { marginTop: '10px' }, onclick: async () => {
         if (!await confirmSheet('Azzerare tutti i voti?', `Verranno cancellati i voti di ${voted.length} studenti${prop ? ' e l\'ipotesi in corso' : ''}. Tutti dovranno votare di nuovo.`, 'Azzera tutti', true)) return;
         busy(null, async () => {
           const ids = Object.keys(votes); const b = writeBatch(db);
-          ids.forEach(id => b.delete(doc(db, 'rounds', r.id, 'votes', id)));
-          b.delete(doc(db, 'rounds', r.id, 'private', 'proposal'));
+          ids.forEach(id => b.delete(dref('rounds', r.id, 'votes', id)));
+          b.delete(dref('rounds', r.id, 'private', 'proposal'));
           await b.commit();
         }, 'Tutti i voti azzerati').catch(() => {});
       } }, icon('trash'), 'Azzera tutti i voti') : null);
@@ -322,7 +385,7 @@ function renderRound(main, r) {
     h('tbody', {}, sorted.map(d => {
       const f = Object.values(votes).filter(v => v.first === d).length, rs = Object.values(votes).filter(v => v.reserve === d).length;
       const capIn = h('input', { class: 'capin', type: 'number', min: '0', inputmode: 'numeric', value: String(capOf(r.id, d)),
-        onchange: e => busy(null, () => setDoc(doc(db, 'rounds', r.id, 'private', 'config'), { caps: { [d]: Math.max(0, parseInt(e.target.value, 10) || 0) } }, { merge: true }), 'Posti aggiornati') });
+        onchange: e => busy(null, () => setDoc(dref('rounds', r.id, 'private', 'config'), { caps: { [d]: Math.max(0, parseInt(e.target.value, 10) || 0) } }, { merge: true }), 'Posti aggiornati') });
       return h('tr', {}, h('td', {}, h('b', {}, C.fmtShort(d)), isCancelled(d) ? h('span', { class: 'pill danger', style: { marginLeft: '6px' } }, 'Annullata') : null),
         h('td', {}, capIn),
         ['voting', 'paused', 'closed'].includes(r.status) ? [h('td', { class: 'num' + (f > capOf(r.id, d) ? ' over' : '') }, f), h('td', { class: 'num' }, rs)]
@@ -334,7 +397,8 @@ function renderRound(main, r) {
     h('p', { class: 'muted small', style: { marginBottom: '10px' } }, 'Scegli come procedere. In entrambi i casi vedrai prima un\'ipotesi da controllare: nulla viene pubblicato finché non la accetti.'),
     h('div', { class: 'stack' },
       h('button', { class: 'btn block violet', onclick: e => busy(e.currentTarget, () => makeInitialProposal(r, 'draw'), 'Ipotesi pronta') }, icon('dice'), 'Sorteggio automatico'),
-      h('button', { class: 'btn block ghost', onclick: e => busy(e.currentTarget, () => makeInitialProposal(r, 'votes'), 'Ipotesi pronta') }, icon('hand'), 'Sistemo a mano partendo dai voti')));
+      h('button', { class: 'btn block ghost', onclick: e => busy(e.currentTarget, () => makeInitialProposal(r, 'votes'), 'Ipotesi pronta') }, icon('hand'), 'Sistemo a mano partendo dai voti')),
+    h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Sistemando a mano potrai poi sorteggiare solo chi non si mette d\'accordo.'));
   if (prop) body.push(proposalEditor(r, prop));
 
   // rivotazione
@@ -366,7 +430,7 @@ function renderRound(main, r) {
     h('div', { class: 'card danger' },
       h('p', { class: 'small', style: { marginBottom: '10px' } }, 'Cancella il giro e tutto ciò che è collegato: voti, posti, date pubblicate nel calendario, "da recuperare" e scambi. Non si può annullare.'),
       h('button', { class: 'btn block danger', onclick: () => deleteRound(r) }, icon('trash'), 'Elimina giro definitivamente')));
-  page(main, hero, body);
+  pg(main, hero, body);
 }
 
 /* ---------- Sblocco date per singolo studente ---------- */
@@ -389,7 +453,7 @@ function unlockSheet(r0, id) {
     const r = A.rounds[r0.id] || r0;
     const cur = r.unlocks?.[id] || [];
     const all = cur.includes('all');
-    const save = next => busy(null, () => updateDoc(doc(db, 'rounds', r.id), { [`unlocks.${id}`]: next.length ? next : deleteField() }), 'Sblocchi aggiornati')
+    const save = next => busy(null, () => updateDoc(dref('rounds', r.id), { [`unlocks.${id}`]: next.length ? next : deleteField() }), 'Sblocchi aggiornati')
       .then(() => setTimeout(refill, 200)).catch(() => {});
     const dates = [...(r.dates || [])].sort();
     return [
@@ -421,12 +485,12 @@ async function deleteRound(r) {
   if (!await confirmSheet('Eliminare tutto il giro?', `Verranno cancellati definitivamente: ${parts.join(', ')}.<br><br>Non si può annullare.`, 'Elimina tutto', true)) return;
   await busy(null, async () => {
     const refs = [];
-    (await getDocs(collection(db, 'rounds', r.id, 'votes'))).forEach(d => refs.push(doc(db, 'rounds', r.id, 'votes', d.id)));
-    refs.push(doc(db, 'rounds', r.id, 'private', 'config'), doc(db, 'rounds', r.id, 'private', 'proposal'));
-    evs.forEach(e => refs.push(doc(db, 'events', e.id)));
-    recs.forEach(x => refs.push(doc(db, 'recoveries', x.id)));
-    sw.forEach(x => refs.push(doc(db, 'swaps', x.id)));
-    refs.push(doc(db, 'rounds', r.id)); // per ultimo il giro stesso
+    (await getDocs(cref('rounds', r.id, 'votes'))).forEach(d => refs.push(dref('rounds', r.id, 'votes', d.id)));
+    refs.push(dref('rounds', r.id, 'private', 'config'), dref('rounds', r.id, 'private', 'proposal'));
+    evs.forEach(e => refs.push(dref('events', e.id)));
+    recs.forEach(x => refs.push(dref('recoveries', x.id)));
+    sw.forEach(x => refs.push(dref('swaps', x.id)));
+    refs.push(dref('rounds', r.id)); // per ultimo il giro stesso
     for (let i = 0; i < refs.length; i += 400) { const b = writeBatch(db); refs.slice(i, i + 400).forEach(x => b.delete(x)); await b.commit(); }
     A.roundId = null;
   }, 'Giro eliminato');
@@ -438,7 +502,12 @@ async function makeInitialProposal(r, mode) {
   const dates = [...r.dates].sort(); const capacity = {}; dates.forEach(d => (capacity[d] = capOf(r.id, d)));
   const args = { studentIds: roundStudents(r), dates, capacity, votes: votesMap(r), isBlocked: blocker([], r) };
   const res = mode === 'draw' ? C.buildSchedule(args) : C.proposalFromVotes(args);
-  await setDoc(doc(db, 'rounds', r.id, 'private', 'proposal'), { mode: 'initial', method: mode, students: roundStudents(r), dates, ...res, createdAt: serverTimestamp() });
+  await setDoc(dref('rounds', r.id, 'private', 'proposal'), { mode: 'initial', method: mode, students: roundStudents(r), dates, ...res, createdAt: serverTimestamp() });
+  if (mode === 'draw') await playDraw(r, { dates, assign: res.assign, unassigned: res.unassigned, drawn: roundStudents(r) });
+}
+// Animazione del sorteggio (si può proiettare in classe). drawn = chi viene "estratto"; gli altri compaiono già al loro posto.
+function playDraw(r, { dates, assign, unassigned = [], drawn }) {
+  return drawShow({ title: 'Sorteggio', subtitle: `${roundTitle(r)} · classe ${className()}`, dates, assign, unassigned, drawn, nameOf: id => C.fullName(st(id)) });
 }
 async function makeMergeProposal(r, { students, dates, useVotes, cancelledEventId = null }) {
   const capacity = {}; const prefill = {};
@@ -447,7 +516,45 @@ async function makeMergeProposal(r, { students, dates, useVotes, cancelledEventI
     prefill[d] = roundEvents(r).filter(e => e.date === d && !e.cancelled).reduce((s, e) => s + (e.studentIds || []).filter(id => !students.includes(id)).length, 0);
   });
   const res = C.buildSchedule({ studentIds: students, dates, capacity, prefill, votes: useVotes ? votesMap(r) : {}, isBlocked: blocker([], r) });
-  await setDoc(doc(db, 'rounds', r.id, 'private', 'proposal'), { mode: 'merge', method: 'draw', students, dates, prefill, cancelledEventId, ...res, createdAt: serverTimestamp() });
+  await setDoc(dref('rounds', r.id, 'private', 'proposal'), { mode: 'merge', method: 'draw', students, dates, prefill, cancelledEventId, ...res, createdAt: serverTimestamp() });
+  return res;
+}
+
+/* Sorteggio solo per alcuni: dopo aver sistemato a mano chi si è messo d'accordo, si sorteggiano gli altri nei posti rimasti */
+function drawPickSheet(r, p0) {
+  const sel = new Set((p0.unassigned || []).filter(st));
+  let useVotes = false;
+  openSheet('Chi va sorteggiato?', (close, refill) => {
+    const p = A.proposals[r.id] || p0; const dates = p.dates || [];
+    const capacity = {}; dates.forEach(d => (capacity[d] = capOf(r.id, d)));
+    const where = {}; dates.forEach(d => (p.assign[d] || []).forEach(id => (where[id] = d)));
+    const ids = sortIds(p.students || []);
+    const free = C.freeSeats({ assign: p.assign, selected: [...sel], dates, capacity, prefill: p.prefill || {} });
+    const groups = [['Non assegnati', ids.filter(id => !where[id])], ...dates.map(d => [C.cap(C.fmtShort(d)), ids.filter(id => where[id] === d)])].filter(([, l]) => l.length);
+    const setAll = (list, on) => { list.forEach(id => (on ? sel.add(id) : sel.delete(id))); refill(); };
+    return [
+      h('p', { class: 'muted small', style: { marginBottom: '10px' } }, 'Seleziona chi non ha trovato un accordo: verrà tolto dal suo posto e sorteggiato nei posti liberi, sempre rispettando i giorni bloccati. Gli altri restano dove sono.'),
+      h('div', { class: 'stat' }, h('div', {}, h('b', {}, sel.size), h('span', {}, 'da sorteggiare')), h('div', {}, h('b', { class: free < sel.size ? 'over' : '' }, free), h('span', {}, 'posti liberi'))),
+      free < sel.size ? h('div', { class: 'card warn', style: { marginTop: '8px' } }, h('span', { class: 'small' }, `Mancano ${sel.size - free} posti: chi resta fuori finisce tra i non assegnati.`)) : null,
+      h('div', { class: 'card', style: { marginTop: '10px' } }, toggleRow('Tieni conto dei loro voti', 'Prima prova la loro 1ª scelta e la riserva, poi un posto libero a caso', useVotes, () => { useVotes = !useVotes; refill(); })),
+      groups.map(([label, list]) => {
+        const allOn = list.every(id => sel.has(id));
+        return [h('div', { class: 'row', style: { justifyContent: 'space-between', margin: '18px 2px 4px' } }, h('b', {}, `${label} (${list.length})`),
+          h('button', { class: 'btn sm ghost', onclick: () => setAll(list, !allOn) }, allOn ? 'Togli tutti' : 'Tutti')),
+          list.map(id => {
+            const how = p.how?.[id];
+            return h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: sel.has(id), onchange: e => { e.target.checked ? sel.add(id) : sel.delete(id); refill(); } }),
+              h('div', { class: 'grow' }, h('div', {}, C.fullName(st(id))), how ? h('div', { class: 'small muted' }, C.HOW_LABEL[how]) : null));
+          })];
+      }),
+      h('div', { class: 'actions' }, h('button', { class: 'btn block violet', disabled: !sel.size, onclick: e => busy(e.currentTarget, async () => {
+        const res = C.drawSelected({ assign: p.assign, how: p.how || {}, unassigned: p.unassigned || [], selected: [...sel], dates, capacity, prefill: p.prefill || {}, votes: votesMap(r), useVotes, isBlocked: blocker([], r) });
+        await updateDoc(dref('rounds', r.id, 'private', 'proposal'), { assign: res.assign, how: res.how, unassigned: res.unassigned });
+        close();
+        await playDraw(r, { dates, assign: res.assign, unassigned: res.unassigned, drawn: [...sel] });
+      }, 'Sorteggio fatto').catch(() => {}) }, icon('dice'), `Sorteggia ${sel.size || ''}`.trim())),
+    ];
+  });
 }
 
 function proposalEditor(r, p) {
@@ -464,7 +571,7 @@ function proposalEditor(r, p) {
   };
   return h('div', {},
     h('div', { class: 'section-title' }, p.mode === 'merge' ? 'Ipotesi di spostamento' : 'Ipotesi di calendario'),
-    h('p', { class: 'muted small', style: { marginBottom: '10px' } }, 'Tocca un nome per spostarlo. Legenda: bordo viola = 1ª scelta, ·R = riserva, ·S = sorteggiato/assegnato d\'ufficio, ·NV = non ha votato, rosso = data bloccata per lui.'),
+    h('p', { class: 'muted small', style: { marginBottom: '10px' } }, 'Tocca un nome per spostarlo. Quando hai sistemato chi è d\'accordo, usa "Sorteggia solo alcuni studenti" per gli altri. Legenda: bordo viola = 1ª scelta, ·R = riserva, ·S = sorteggiato/assegnato d\'ufficio, ·NV = non ha votato, rosso = data bloccata per lui.'),
     over.length ? h('div', { class: 'card danger', style: { marginBottom: '10px' } }, h('b', {}, 'Giorni oltre la capienza: '), over.map(C.fmtShort).join(', ')) : null,
     dates.map(d => {
       const n = assigned(d), cap = capOf(r.id, d);
@@ -477,10 +584,14 @@ function proposalEditor(r, p) {
       h('div', { class: 'chips' }, sortIds(p.unassigned).map(id => chip(id, null)))) : null,
     h('div', { class: 'stack', style: { marginTop: '14px' } },
       h('button', { class: 'btn block lime', onclick: () => acceptProposal(r, p) }, icon('check'), 'Accetta e pubblica'),
-      h('button', { class: 'btn block ghost', onclick: e => busy(e.currentTarget, () => p.mode === 'merge'
-        ? makeMergeProposal(r, { students: p.students, dates, useVotes: !!r.revote, cancelledEventId: p.cancelledEventId })
-        : makeInitialProposal(r, 'draw'), 'Nuovo sorteggio fatto') }, icon('dice'), 'Rifai sorteggio'),
-      p.mode === 'initial' ? h('button', { class: 'btn block line', onclick: e => busy(e.currentTarget, () => deleteDoc(doc(db, 'rounds', r.id, 'private', 'proposal')), 'Ipotesi scartata') }, 'Scarta ipotesi') : null));
+      h('button', { class: 'btn block violet', onclick: () => drawPickSheet(r, p) }, icon('dice'), 'Sorteggia solo alcuni studenti'),
+      h('button', { class: 'btn block ghost', onclick: e => busy(e.currentTarget, async () => {
+        if (p.mode === 'merge') {
+          const res = await makeMergeProposal(r, { students: p.students, dates, useVotes: !!r.revote, cancelledEventId: p.cancelledEventId });
+          await playDraw(r, { dates, assign: res.assign, unassigned: res.unassigned, drawn: p.students });
+        } else await makeInitialProposal(r, 'draw');
+      }, 'Nuovo sorteggio fatto') }, icon('dice'), 'Rifai il sorteggio di tutti'),
+      p.mode === 'initial' ? h('button', { class: 'btn block line', onclick: e => busy(e.currentTarget, () => deleteDoc(dref('rounds', r.id, 'private', 'proposal')), 'Ipotesi scartata') }, 'Scarta ipotesi') : null));
 }
 
 function moveSheet(r, p, id) {
@@ -491,7 +602,7 @@ function moveSheet(r, p, id) {
     const assign = {}; for (const d of Object.keys(p.assign)) assign[d] = (p.assign[d] || []).filter(x => x !== id);
     let unassigned = (p.unassigned || []).filter(x => x !== id);
     if (target) assign[target] = [...(assign[target] || []), id]; else unassigned = [...unassigned, id];
-    await busy(null, () => updateDoc(doc(db, 'rounds', r.id, 'private', 'proposal'), { assign, unassigned, [`how.${id}`]: 'manual' }), 'Spostato');
+    await busy(null, () => updateDoc(dref('rounds', r.id, 'private', 'proposal'), { assign, unassigned, [`how.${id}`]: 'manual' }), 'Spostato');
     close();
   };
   openSheet(C.fullName(st(id)), close => [
@@ -517,14 +628,15 @@ async function acceptProposal(r, p) {
     const b = writeBatch(db);
     for (const d of p.dates) {
       const ids = p.assign[d] || []; if (!ids.length) continue;
+      const drawn = ids.filter(id => C.isDrawnHow(p.how?.[id])); // per l'animazione lato studente
       const existing = p.mode === 'merge' ? roundEvents(r).find(e => e.date === d && !e.cancelled) : null;
-      if (existing) b.update(doc(db, 'events', existing.id), { studentIds: [...new Set([...(existing.studentIds || []), ...ids])] });
-      else b.set(doc(collection(db, 'events')), { type: 'interrogazione', subjectId: r.subjectId, date: d, studentIds: ids, roundId: r.id, cancelled: false, createdAt: serverTimestamp() });
+      if (existing) b.update(dref('events', existing.id), { studentIds: [...new Set([...(existing.studentIds || []), ...ids])], drawn: [...new Set([...(existing.drawn || []), ...drawn])] });
+      else b.set(doc(cref('events')), { type: 'interrogazione', subjectId: r.subjectId, date: d, studentIds: ids, drawn, roundId: r.id, cancelled: false, createdAt: serverTimestamp() });
     }
-    for (const id of p.unassigned || []) b.set(doc(collection(db, 'recoveries')), { uid: id, subjectId: r.subjectId, roundId: r.id, fromDate: null, status: 'open', createdAt: serverTimestamp() });
-    if (p.mode === 'initial') b.update(doc(db, 'rounds', r.id), { status: 'published' });
-    else if (r.revote) b.update(doc(db, 'rounds', r.id), { revote: deleteField() });
-    b.delete(doc(db, 'rounds', r.id, 'private', 'proposal'));
+    for (const id of p.unassigned || []) b.set(doc(cref('recoveries')), { uid: id, subjectId: r.subjectId, roundId: r.id, fromDate: null, status: 'open', createdAt: serverTimestamp() });
+    if (p.mode === 'initial') b.update(dref('rounds', r.id), { status: 'published' });
+    else if (r.revote) b.update(dref('rounds', r.id), { revote: deleteField() });
+    b.delete(dref('rounds', r.id, 'private', 'proposal'));
     await b.commit();
   }, 'Pubblicato');
 }
@@ -550,21 +662,22 @@ async function doCancel(r, ev, others, extra, mode) {
   if (!dates.length) throw new Error('Non ci sono altre date: aggiungine una');
   const students = [...(ev.studentIds || [])];
   const b = writeBatch(db);
-  b.update(doc(db, 'events', ev.id), { cancelled: true });
-  if (extra) b.update(doc(db, 'rounds', r.id), { dates: [...new Set([...(r.dates || []), extra])].sort() });
+  b.update(dref('events', ev.id), { cancelled: true });
+  if (extra) b.update(dref('rounds', r.id), { dates: [...new Set([...(r.dates || []), extra])].sort() });
   if (mode === 'revote') {
-    b.update(doc(db, 'rounds', r.id), { revote: { active: true, students, dates } });
-    students.forEach(id => b.delete(doc(db, 'rounds', r.id, 'votes', id)));
+    b.update(dref('rounds', r.id), { revote: { active: true, students, dates } });
+    students.forEach(id => b.delete(dref('rounds', r.id, 'votes', id)));
   }
   await b.commit();
   if (mode === 'auto') {
     A.events[ev.id] = { ...ev, cancelled: true }; // aggiornamento locale immediato per il calcolo
-    await makeMergeProposal(r, { students, dates, useVotes: false, cancelledEventId: ev.id });
+    const res = await makeMergeProposal(r, { students, dates, useVotes: false, cancelledEventId: ev.id });
+    await playDraw(r, { dates, assign: res.assign, unassigned: res.unassigned, drawn: students });
   }
 }
 async function closeRevote(r) {
   const rv = r.revote;
-  await updateDoc(doc(db, 'rounds', r.id), { 'revote.active': false });
+  await updateDoc(dref('rounds', r.id), { 'revote.active': false });
   await makeMergeProposal(r, { students: rv.students, dates: rv.dates, useVotes: true });
 }
 
@@ -579,9 +692,9 @@ function assignedStudentSheet(ev, id) {
         const n = (tgt?.studentIds || []).length; const rs = reasonsFor(id, d, [ev.id], r);
         return h('button', { class: 'list-item', onclick: e => busy(e.currentTarget, async () => {
           const b = writeBatch(db);
-          b.update(doc(db, 'events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id) });
-          if (tgt) b.update(doc(db, 'events', tgt.id), { studentIds: [...new Set([...(tgt.studentIds || []), id])] });
-          else b.set(doc(collection(db, 'events')), { type: 'interrogazione', subjectId: ev.subjectId, date: d, studentIds: [id], roundId: r.id, cancelled: false, createdAt: serverTimestamp() });
+          b.update(dref('events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id), drawn: (ev.drawn || []).filter(x => x !== id) });
+          if (tgt) b.update(dref('events', tgt.id), { studentIds: [...new Set([...(tgt.studentIds || []), id])] });
+          else b.set(doc(cref('events')), { type: 'interrogazione', subjectId: ev.subjectId, date: d, studentIds: [id], roundId: r.id, cancelled: false, createdAt: serverTimestamp() });
           await b.commit();
         }, 'Spostato').then(close).catch(() => {}) },
         h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(d))), rs.length ? h('div', { class: 's', style: { color: 'var(--danger)' } }, rs.map(x => C.reasonText(x, A.subjects, false)).join('; ')) : null),
@@ -592,12 +705,12 @@ function assignedStudentSheet(ev, id) {
         if (!await confirmSheet('Segnare da recuperare?', 'Da usare solo in casi gravi. Lo studente esce da questa data e finisce nell\'elenco "Da recuperare".', 'Segna da recuperare', true)) return;
         await busy(null, async () => {
           const b = writeBatch(db);
-          b.update(doc(db, 'events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id) });
-          b.set(doc(collection(db, 'recoveries')), { uid: id, subjectId: ev.subjectId, roundId: ev.roundId || null, fromDate: ev.date, fromEventId: ev.id, status: 'open', createdAt: serverTimestamp() });
+          b.update(dref('events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id), drawn: (ev.drawn || []).filter(x => x !== id) });
+          b.set(doc(cref('recoveries')), { uid: id, subjectId: ev.subjectId, roundId: ev.roundId || null, fromDate: ev.date, fromEventId: ev.id, status: 'open', createdAt: serverTimestamp() });
           await b.commit();
         }, 'Segnato da recuperare'); close();
       } }, 'Segna da recuperare'),
-      !r ? h('button', { class: 'btn block line', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id) }), 'Rimosso').then(close).catch(() => {}) }, 'Togli da questo evento') : null),
+      !r ? h('button', { class: 'btn block line', onclick: e => busy(e.currentTarget, () => updateDoc(dref('events', ev.id), { studentIds: (ev.studentIds || []).filter(x => x !== id) }), 'Rimosso').then(close).catch(() => {}) }, 'Togli da questo evento') : null),
   ]);
 }
 
@@ -606,8 +719,9 @@ function assignedStudentSheet(ev, id) {
    ========================================================= */
 function renderCal(main) {
   clearFab();
-  const { hero, body } = calendar({ state: A.cal, events: events(), students: A.students, subjects: A.subjects, me: null, onChange: render, onEventClick: adminEventSheet, timetable: A.tt });
-  page(main, hero, body);
+  const { hero, body } = calendar({ state: A.cal, events: events(), students: A.students, subjects: A.subjects, me: null, onChange: render, onEventClick: adminEventSheet,
+    timetable: A.tt, ttChanges: A.ttChanges, onTTEdit: ttHours().length ? dayChangeSheet : null });
+  pg(main, hero, body);
   fab('Aggiungi evento', () => eventSheet(A.cal.sel));
 }
 function adminEventSheet(ev) {
@@ -623,7 +737,7 @@ function adminEventSheet(ev) {
     h('div', { class: 'actions' },
       r && !ev.cancelled && ev.date >= C.todayISO() ? h('button', { class: 'btn block danger-ghost', onclick: () => { close(); cancelDaySheet(r, ev); } }, 'Annulla giornata') : null,
       r ? h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'giri'; A.roundId = r.id; render(); } }, 'Apri il giro') : null,
-      !r || ev.cancelled ? h('button', { class: 'btn block danger', onclick: async () => { if (await confirmSheet('Eliminare l\'evento?', 'Sparirà dal calendario di tutti.', 'Elimina', true)) { await busy(null, () => deleteDoc(doc(db, 'events', ev.id)), 'Evento eliminato'); close(); } } }, icon('trash'), 'Elimina evento') : null),
+      !r || ev.cancelled ? h('button', { class: 'btn block danger', onclick: async () => { if (await confirmSheet('Eliminare l\'evento?', 'Sparirà dal calendario di tutti.', 'Elimina', true)) { await busy(null, () => deleteDoc(dref('events', ev.id)), 'Evento eliminato'); close(); } } }, icon('trash'), 'Elimina evento') : null),
   ]);
 }
 function eventSheet(date) {
@@ -654,7 +768,7 @@ function eventSheet(date) {
         if (!dateIn.value) throw new Error('Scegli una data');
         if (C.isWeekend(dateIn.value)) throw new Error('Sabato e domenica non si va a scuola');
         if (!sel.size) throw new Error('Scegli almeno uno studente');
-        await addDoc(collection(db, 'events'), { type, subjectId: subj.value, date: dateIn.value, studentIds: [...sel], roundId: null, cancelled: false, note: note.value.trim(), createdAt: serverTimestamp() });
+        await addDoc(cref('events'), { type, subjectId: subj.value, date: dateIn.value, studentIds: [...sel], roundId: null, cancelled: false, note: note.value.trim(), createdAt: serverTimestamp() });
         A.cal.sel = dateIn.value;
       }, 'Evento aggiunto').then(close).catch(() => {}) }, 'Salva')),
     ];
@@ -667,7 +781,7 @@ function eventSheet(date) {
 function renderStudents(main) {
   clearFab();
   const ids = studentIds();
-  page(main, [h('h1', {}, 'Studenti'), h('p', { class: 'sub' }, `${ids.length} account nella classe`)], [
+  pg(main, [h('h1', {}, 'Studenti'), h('p', { class: 'sub' }, `${ids.length} account nella ${className()}`)], [
     ids.length ? ids.map(id => {
       const s = st(id); const ex = Object.keys(A.excl[id]?.dates || {}).filter(d => d >= C.todayISO()).length; const wk = Object.keys(A.excl[id]?.weekdays || {}).map(w => C.WEEKDAYS.find(x => x[0] === w)?.[1].slice(0, 3).toLowerCase()).filter(Boolean);
       return h('button', { class: 'list-item', onclick: () => studentSheet(id) }, h('span', { class: 'av' }, C.initials(s)),
@@ -686,20 +800,23 @@ function addStudentsSheet() {
       h('span', { class: 'pill ' + (x.ok ? 'ok' : 'danger') }, x.ok ? (x.note || 'Creato') : x.err))),
     h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: close }, 'Chiudi')),
   ] : [
-    h('p', { class: 'muted small', style: { marginBottom: '10px' } }, 'Uno per riga, "Nome Cognome". Per cognomi o nomi composti usa la virgola: "Maria Grazia, De Luca".'),
+    h('p', { class: 'muted small', style: { marginBottom: '10px' } }, `Gli account vengono creati nella classe ${className()}. Uno per riga, "Nome Cognome". Per cognomi o nomi composti usa la virgola: "Maria Grazia, De Luca".`),
     ta,
     h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: async e => {
       const lines = ta.value.split('\n').map(C.parseStudentLine).filter(Boolean);
       if (!lines.length) return toast('Scrivi almeno un nome', 'error');
       const btn = e.currentTarget; btn.disabled = true;
-      const taken = new Set(Object.values(A.students).map(s => s.username)); results = [];
+      const taken = new Set([...Object.values(A.students).map(s => s.username), ...Object.values(A.members).map(m => m.username).filter(Boolean)]); results = [];
       for (const [i, p] of lines.entries()) {
         btn.textContent = `Creo ${i + 1} di ${lines.length}…`;
         const username = C.uniqueUsername(C.baseUsername(p.first, p.last), taken);
         const pw = C.initialPassword(username);
         try {
           const uid = await createStudentAccount(C.emailOf(username), pw);
-          await setDoc(doc(db, 'students', uid), { first: p.first, last: p.last, username, rulesAccepted: false, createdAt: serverTimestamp() });
+          const b = writeBatch(db);
+          b.set(dref('students', uid), { first: p.first, last: p.last, username, rulesAccepted: false, createdAt: serverTimestamp() });
+          b.set(doc(db, 'members', uid), { classId: CID, username });
+          await b.commit();
           taken.add(username);
           results.push({ name: `${p.first} ${p.last}`, username, ok: true, note: username !== C.baseUsername(p.first, p.last) ? 'Omonimo: numero aggiunto' : pw !== username ? 'Password speciale (nome corto)' : null });
         } catch (x) { console.error(x); results.push({ name: `${p.first} ${p.last}`, username, ok: false, err: errMsg(x) }); }
@@ -723,9 +840,9 @@ function studentSheet(id) {
     const fIn = h('input', { type: 'text', value: s.first }), lIn = h('input', { type: 'text', value: s.last });
     const toggleWeekday = (wd, label) => busy(null, async () => {
       if (Object.prototype.hasOwnProperty.call(weekly, wd)) {
-        await updateDoc(doc(db, 'exclusions', id), { [`weekdays.${wd}`]: deleteField() });
+        await updateDoc(dref('exclusions', id), { [`weekdays.${wd}`]: deleteField() });
       } else {
-        await setDoc(doc(db, 'exclusions', id), { weekdays: { [wd]: wNote.value.trim() } }, { merge: true });
+        await setDoc(dref('exclusions', id), { weekdays: { [wd]: wNote.value.trim() } }, { merge: true });
         const n = mine.filter(e => e.type === 'interrogazione' && String(C.fromISO(e.date).getDay()) === wd).length;
         if (n) toast(`Attenzione: ha già ${n} interrogazion${n === 1 ? 'e' : 'i'} di ${label.toLowerCase()}`, 'error');
         wNote.value = '';
@@ -738,7 +855,7 @@ function studentSheet(id) {
         h('div', { class: 'row' }, h('button', { class: 'btn sm grow', onclick: e => busy(e.currentTarget, async () => {
           const first = fIn.value.trim().replace(/\s+/g, ' '), last = lIn.value.trim().replace(/\s+/g, ' ');
           if (!first || !last) throw new Error('Nome e cognome sono obbligatori');
-          await updateDoc(doc(db, 'students', id), { first, last }); editName = false;
+          await updateDoc(dref('students', id), { first, last }); editName = false;
         }, 'Nome aggiornato').then(later).catch(() => {}) }, 'Salva'), h('button', { class: 'btn sm ghost grow', onclick: () => { editName = false; refill(); } }, 'Annulla')))
         : h('div', { class: 'row' }, h('span', { class: 'av', style: { width: '48px', height: '48px', fontSize: '16px', background: 'var(--surface-2)', boxShadow: 'none' } }, C.initials(s)),
           h('div', { class: 'grow' }, h('div', { style: { fontWeight: '800', fontSize: '18px' } }, C.fullName(s)),
@@ -764,11 +881,11 @@ function studentSheet(id) {
       h('div', { class: 'section-title' }, 'Date singole escluse'),
       h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Assenze o motivi personali: in queste date non può essere messo. Gli altri non le vedono.'),
       ex.length ? ex.map(([d, n]) => h('div', { class: 'list-item' }, h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(d))), n ? h('div', { class: 's' }, n) : null),
-        h('button', { class: 'iconbtn', style: { background: 'var(--danger-soft)', color: 'var(--danger)' }, 'aria-label': 'Rimuovi', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'exclusions', id), { [`dates.${d}`]: deleteField() }), 'Esclusione rimossa').then(later).catch(() => {}) }, icon('trash'))))
+        h('button', { class: 'iconbtn', style: { background: 'var(--danger-soft)', color: 'var(--danger)' }, 'aria-label': 'Rimuovi', onclick: e => busy(e.currentTarget, () => updateDoc(dref('exclusions', id), { [`dates.${d}`]: deleteField() }), 'Esclusione rimossa').then(later).catch(() => {}) }, icon('trash'))))
         : h('p', { class: 'small muted' }, 'Nessuna'),
       h('div', { class: 'row', style: { marginTop: '10px', alignItems: 'stretch' } }, h('div', { class: 'grow' }, dIn), h('button', { class: 'btn ghost', onclick: e => busy(e.currentTarget, async () => {
         if (!dIn.value) throw new Error('Scegli una data');
-        await setDoc(doc(db, 'exclusions', id), { dates: { [dIn.value]: nIn.value.trim() } }, { merge: true });
+        await setDoc(dref('exclusions', id), { dates: { [dIn.value]: nIn.value.trim() } }, { merge: true });
         const clash = events().find(ev => ev.type === 'interrogazione' && !ev.cancelled && ev.date === dIn.value && (ev.studentIds || []).includes(id));
         if (clash) toast('Attenzione: ha già un\'interrogazione in quella data', 'error');
         dIn.value = ''; nIn.value = '';
@@ -777,7 +894,7 @@ function studentSheet(id) {
 
       h('div', { class: 'actions' }, h('button', { class: 'btn block danger-ghost', onclick: async () => {
         if (!await confirmSheet('Rimuovere lo studente?', `${C.fullName(s)} sparirà dalla classe e non potrà più usare il sito. <br><br>Per liberare del tutto il nome utente elimina anche l'account da Firebase Console → Authentication.`, 'Rimuovi', true)) return;
-        await busy(null, async () => { const b = writeBatch(db); b.delete(doc(db, 'students', id)); b.delete(doc(db, 'exclusions', id)); await b.commit(); }, 'Studente rimosso'); close();
+        await busy(null, async () => { const b = writeBatch(db); b.delete(dref('students', id)); b.delete(dref('exclusions', id)); b.delete(doc(db, 'members', id)); await b.commit(); }, 'Studente rimosso'); close();
       } }, 'Rimuovi studente')),
     ];
   });
@@ -791,7 +908,10 @@ function renderRequests(main) {
   const pend = Object.values(A.swaps).filter(s => s.status === 'pending_admin');
   const peer = Object.values(A.swaps).filter(s => s.status === 'pending_peer');
   const recs = Object.values(A.recov).filter(r => r.status === 'open');
-  page(main, [h('h1', {}, 'Richieste'), h('p', { class: 'sub' }, 'Scambi da approvare e interrogazioni da recuperare.')], [
+  const unl = Object.values(A.unlockReqs).filter(x => x.status === 'pending').sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+  pg(main, [h('h1', {}, 'Richieste'), h('p', { class: 'sub' }, 'Sblocchi, scambi da approvare e interrogazioni da recuperare.')], [
+    h('div', { class: 'section-title' }, `Richieste di sblocco (${unl.length})`),
+    unl.length ? unl.map(unlockReqCard) : h('p', { class: 'small muted' }, 'Nessuna richiesta di sblocco.'),
     h('div', { class: 'section-title' }, `Scambi da approvare (${pend.length})`),
     pend.length ? pend.map(swapCard) : h('p', { class: 'small muted' }, 'Nessuno scambio in attesa.'),
     peer.length ? [h('div', { class: 'section-title' }, 'In attesa del compagno'), peer.map(s => h('div', { class: 'card' }, h('div', { class: 'small' },
@@ -802,6 +922,29 @@ function renderRequests(main) {
       h('button', { class: 'btn sm', onclick: () => recoverSheet(r) }, 'Assegna data'))))
       : h('p', { class: 'small muted' }, 'Nessuno da recuperare.'),
   ]);
+}
+function unlockReqCard(x) {
+  const r = A.rounds[x.roundId];
+  const rs = r ? reasonsFor(x.uid, x.date) : [];
+  const ev = rs.filter(y => y.kind === 'event'), ex = rs.filter(y => y.kind !== 'event');
+  const already = r && C.isUnlocked(r.unlocks?.[x.uid], x.date);
+  const decide = (status, btn) => busy(btn, async () => {
+    const b = writeBatch(db);
+    if (status === 'approved' && r) b.update(dref('rounds', r.id), { [`unlocks.${x.uid}`]: arrayUnion(x.date) });
+    b.update(dref('unlockRequests', x.id), { status, updatedAt: serverTimestamp() });
+    await b.commit();
+  }, status === 'approved' ? 'Data sbloccata' : 'Richiesta rifiutata').catch(() => {});
+  return h('div', { class: 'card white' },
+    h('div', { class: 'row' }, avatar(st(x.uid)), h('div', { class: 'grow' }, h('b', {}, C.fullName(st(x.uid))),
+      h('div', { class: 'small muted' }, r ? roundTitle(r) : 'Giro eliminato'))),
+    h('p', { style: { marginTop: '10px' } }, 'Chiede di sbloccare ', h('b', {}, C.fmtLong(x.date)), '.'),
+    ev.length ? h('div', { class: 'small muted', style: { marginTop: '4px' } }, 'Bloccata da: ' + ev.map(y => C.reasonText(y, A.subjects, false)).join('; ')) : null,
+    ex.length ? h('div', { class: 'small', style: { color: 'var(--danger)', marginTop: '4px' } }, ex.map(y => C.reasonText(y, A.subjects, false)).join('; ') + ' — resta esclusa anche se sblocchi') : null,
+    already ? h('div', { class: 'small', style: { color: 'var(--ok)', marginTop: '4px', fontWeight: '700' } }, 'Già sbloccata') : null,
+    x.note ? h('div', { class: 'req-note' }, '“', x.note, '”') : null,
+    h('div', { class: 'row', style: { marginTop: '12px' } },
+      r ? h('button', { class: 'btn sm lime grow', onclick: e => decide('approved', e.currentTarget) }, icon('unlock'), 'Sblocca') : null,
+      h('button', { class: 'btn sm ghost grow', onclick: e => decide('rejected', e.currentTarget) }, 'Rifiuta')));
 }
 function swapCard(s) {
   const evA = A.events[s.fromEventId], evB = A.events[s.toEventId];
@@ -818,12 +961,13 @@ function swapCard(s) {
     h('div', { class: 'row', style: { marginTop: '12px' } },
       valid ? h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, async () => {
         const b = writeBatch(db);
-        b.update(doc(db, 'events', evA.id), { studentIds: [...(evA.studentIds || []).filter(x => x !== s.fromUid), s.toUid] });
-        b.update(doc(db, 'events', evB.id), { studentIds: [...(evB.studentIds || []).filter(x => x !== s.toUid), s.fromUid] });
-        b.update(doc(db, 'swaps', s.id), { status: 'approved', updatedAt: serverTimestamp() });
+        const nd = e => (e.drawn || []).filter(x => x !== s.fromUid && x !== s.toUid);
+        b.update(dref('events', evA.id), { studentIds: [...(evA.studentIds || []).filter(x => x !== s.fromUid), s.toUid], drawn: nd(evA) });
+        b.update(dref('events', evB.id), { studentIds: [...(evB.studentIds || []).filter(x => x !== s.toUid), s.fromUid], drawn: nd(evB) });
+        b.update(dref('swaps', s.id), { status: 'approved', updatedAt: serverTimestamp() });
         await b.commit();
       }, 'Scambio approvato') }, 'Approva') : null,
-      h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'swaps', s.id), { status: 'rejected', updatedAt: serverTimestamp() }), 'Scambio rifiutato') }, 'Rifiuta')));
+      h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(dref('swaps', s.id), { status: 'rejected', updatedAt: serverTimestamp() }), 'Scambio rifiutato') }, 'Rifiuta')));
 }
 function recoverSheet(rec) {
   const dIn = h('input', { type: 'date', min: C.todayISO() });
@@ -833,9 +977,9 @@ function recoverSheet(rec) {
     const joinable = d ? events().find(e => e.type === 'interrogazione' && !e.cancelled && e.date === d && e.subjectId === rec.subjectId) : null;
     const assign = async (date, existing) => {
       const b = writeBatch(db);
-      if (existing) b.update(doc(db, 'events', existing.id), { studentIds: [...new Set([...(existing.studentIds || []), rec.uid])] });
-      else b.set(doc(collection(db, 'events')), { type: 'interrogazione', subjectId: rec.subjectId, date, studentIds: [rec.uid], roundId: rec.roundId || null, cancelled: false, note: 'Recupero', createdAt: serverTimestamp() });
-      b.update(doc(db, 'recoveries', rec.id), { status: 'done', toDate: date, updatedAt: serverTimestamp() });
+      if (existing) b.update(dref('events', existing.id), { studentIds: [...new Set([...(existing.studentIds || []), rec.uid])] });
+      else b.set(doc(cref('events')), { type: 'interrogazione', subjectId: rec.subjectId, date, studentIds: [rec.uid], roundId: rec.roundId || null, cancelled: false, note: 'Recupero', createdAt: serverTimestamp() });
+      b.update(dref('recoveries', rec.id), { status: 'done', toDate: date, updatedAt: serverTimestamp() });
       await b.commit();
     };
     const quick = r ? (r.dates || []).filter(x => x >= C.todayISO()).sort() : [];
@@ -858,13 +1002,183 @@ function recoverSheet(rec) {
 }
 
 /* =========================================================
+   GUIDA PER L'ADMIN
+   ========================================================= */
+function go(tab, more = null) { return () => { A.tab = tab; A.more = more; A.roundId = null; window.scrollTo(0, 0); render(); }; }
+function showTutorial() {
+  stepsSheet('Guida per l\'admin', [
+    { icon: 'school', title: `Benvenuto su ${C.APP_NAME}`, html: `<p>Da qui gestisci le interrogazioni programmate di <b>una o più classi</b>.</p><p>In alto in ogni pagina vedi la classe su cui stai lavorando: toccala per passare a un'altra o crearne una nuova. Ogni classe ha i suoi studenti, materie, orario e giri.</p><p>Classi e account si creano <b>solo da questo pannello</b>.</p>`, action: { label: 'Vai alle classi', go: go('altro', 'classi') } },
+    { icon: 'users', title: 'Studenti', html: `<p>In <b>Studenti → +</b> incolla l'elenco della classe, un nome per riga ("Nome Cognome"; per nomi composti: "Maria Grazia, De Luca").</p><ul><li>Nome utente: <b>nome.cognome</b>, password iniziale uguale.</li><li>I nomi utente sono unici tra tutte le classi: per gli omonimi si aggiunge un numero.</li><li>Nella scheda dello studente imposti un <b>giorno fisso escluso</b> (es. atleta) o singole <b>date escluse</b>.</li></ul>`, action: { label: 'Vai agli studenti', go: go('studenti') } },
+    { icon: 'palette', title: 'Materie e orario', html: `<p>In <b>Altro</b> crea le materie con il loro colore, poi apri <b>Orario settimanale</b>: imposta le ore e tocca ogni casella per scegliere la lezione.</p><p>Gli studenti vedono l'orario nel Calendario, sotto gli impegni del giorno.</p>`, action: { label: 'Vai ad Altro', go: go('altro') } },
+    { icon: 'clock', title: 'Variazioni d\'orario', html: `<p>Se un giorno l'orario cambia (uscita anticipata, assemblea, cambio d'ora) non toccare la settimana tipo: nel <b>Calendario</b> scegli il giorno e premi <b>Varia</b> sopra l'orario.</p><ul><li>Tocca un'ora per cambiarla solo in quella data.</li><li>"Uscita anticipata" libera in un colpo le ore finali.</li><li>"Ripristina" torna all'orario normale.</li></ul><p>La classe vede la scritta "Orario variato" e la tua nota.</p>`, action: { label: 'Vai al calendario', go: go('cal') } },
+    { icon: 'layers', title: 'Giri di interrogazioni', html: `<p>In <b>Giri → +</b> scegli materia, chi partecipa, i giorni in cui viene il docente e quanti posti ha ogni giorno (la classe non li vede mai).</p><p>Se la materia è nell'orario, <b>Aggiungi i prossimi giorni dall'orario</b> inserisce da solo le date di lezione.</p><p>Poi <b>Apri votazione</b>: ognuno sceglie una 1ª data e una riserva. Quando hai abbastanza voti, <b>Chiudi votazione</b>.</p>`, action: { label: 'Vai ai giri', go: go('giri') } },
+    { icon: 'dice', title: 'Sorteggio', html: `<p>A votazione chiusa hai due strade, e in entrambe vedi prima un'<b>ipotesi</b>: nulla è pubblico finché non la accetti.</p><ul><li><b>Sorteggio automatico</b>: tutti al loro posto in base a voti, posti e date bloccate.</li><li><b>Sistemo a mano</b>: sposti tu i nomi, poi con <b>Sorteggia solo alcuni studenti</b> selezioni chi non trova un accordo. Solo loro vengono rimessi a sorte nei posti liberi; gli altri restano fermi.</li></ul><p>Il sorteggio parte con un'animazione che puoi proiettare in classe. Chi viene sorteggiato, aprendo il sito, vede la sua data uscire dal rullo.</p>` },
+    { icon: 'inbox', title: 'Richieste', html: `<p>In <b>Richieste</b> trovi:</p><ul><li><b>Sblocchi</b>: uno studente chiede di poter scegliere una data bloccata perché vicina a un'altra sua interrogazione. "Sblocca" la rende disponibile solo per quel giro.</li><li><b>Scambi</b> già accettati dal compagno, da approvare.</li><li><b>Da recuperare</b>: assegna una nuova data.</li></ul>`, action: { label: 'Vai alle richieste', go: go('richieste') } },
+    { icon: 'cal', title: 'Calendario e imprevisti', html: `<p>Nel <b>Calendario</b> con il <b>+</b> aggiungi verifiche (solo promemoria) o interrogazioni singole.</p><p>Se il docente salta un giorno, apri l'evento e premi <b>Annulla giornata</b>: gli interrogati vengono spostati a sorte oppure rivotano solo loro.</p><p>Toccando un nome puoi spostarlo o segnarlo "da recuperare".</p><p>Questa guida resta sempre in <b>Altro → Guida per l'admin</b>.</p>` },
+  ]);
+}
+
+/* =========================================================
+   CLASSI (creazione, rinomina, eliminazione, importazione dati v9)
+   ========================================================= */
+const LEGACY_COLLS = ['students', 'subjects', 'timetable', 'events', 'exclusions', 'recoveries', 'swaps'];
+const CLASS_COLLS = ['subjects', 'timetable', 'events', 'exclusions', 'recoveries', 'swaps', 'unlockRequests'];
+const migrated = () => Object.values(A.classes).some(c => c.migratedFrom === 'legacy');
+async function commitAll(ops) { // ops = [['set', ref, data] | ['delete', ref]]
+  for (let i = 0; i < ops.length; i += 400) {
+    const b = writeBatch(db);
+    ops.slice(i, i + 400).forEach(([k, ref, data]) => (k === 'set' ? b.set(ref, data) : b.delete(ref)));
+    await b.commit();
+  }
+}
+function renderNoClass() {
+  const name = h('input', { type: 'text', placeholder: 'es. 3B', maxlength: '20' });
+  root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' },
+    h('div', { class: 'logo' }, mark(34)), h('h1', {}, A.legacy && !migrated() ? 'Aggiornamento a più classi' : 'Crea la prima classe'),
+    h('p', { class: 'sub' }, A.legacy && !migrated()
+      ? `${C.APP_NAME} ora gestisce più classi. I dati che hai già (studenti, giri, orario…) vanno spostati una volta nella loro classe: account e password degli studenti non cambiano.`
+      : 'Ogni classe ha i suoi studenti, materie, orario e giri. Potrai aggiungerne altre in qualsiasi momento.'),
+    h('div', { class: 'login-form' },
+      A.legacy && !migrated() ? [
+        h('label', { class: 'field' }, h('span', {}, 'Nome della classe dei dati esistenti'), (name.value = '3B', name)),
+        h('button', { class: 'btn block lime', onclick: e => migrateLegacy(name.value, e.currentTarget) }, 'Sposta i dati nella classe'),
+        h('p', { class: 'small muted', style: { marginTop: '10px' } }, 'Prima di farlo, pubblica le nuove regole di sicurezza (file firestore.rules), altrimenti l\'operazione non è permessa.'),
+      ] : [
+        h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), name),
+        h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => createClass(name.value), 'Classe creata').catch(() => {}) }, 'Crea classe'),
+      ]),
+    h('button', { class: 'btn block line', style: { marginTop: '12px' }, onclick: () => signOut(auth) }, icon('logout'), 'Esci'))));
+}
+async function createClass(rawName, copyFrom = null) {
+  const name = rawName.trim().replace(/\s+/g, ' ');
+  if (!name) throw new Error('Scrivi il nome della classe');
+  if (Object.values(A.classes).some(c => (c.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Esiste già una classe con questo nome');
+  const ref = await addDoc(collection(db, 'classes'), { name, createdAt: serverTimestamp() });
+  if (copyFrom) {
+    const ops = [];
+    for (const [id, sj] of Object.entries(A.subjects)) { const { id: _x, ...data } = sj; ops.push(['set', doc(db, 'classes', ref.id, 'subjects', id), data]); }
+    if (A.tt) ops.push(['set', doc(db, 'classes', ref.id, 'timetable', 'week'), { ...A.tt, updatedAt: serverTimestamp() }]);
+    await commitAll(ops);
+  }
+  A.tab = 'studenti'; A.more = null;
+  selectClass(ref.id);
+  return ref.id;
+}
+function newClassSheet() {
+  const name = h('input', { type: 'text', placeholder: 'es. 4A', maxlength: '20' });
+  let copy = Object.keys(A.subjects).length > 0;
+  openSheet('Nuova classe', close => [
+    h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), name),
+    CID && Object.keys(A.subjects).length ? h('label', { class: 'check', style: { borderBottom: 0 } },
+      h('input', { type: 'checkbox', checked: copy, onchange: e => (copy = e.target.checked) }),
+      h('div', { class: 'grow' }, h('div', {}, `Copia materie e orario dalla ${className()}`), h('div', { class: 'small muted' }, 'Comodo se hanno gli stessi docenti: poi puoi modificarli.'))) : null,
+    h('p', { class: 'small muted' }, 'Dopo la creazione passi alla nuova classe: aggiungi gli studenti dalla sezione Studenti. Gli account li puoi creare solo da qui, dal pannello admin.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => createClass(name.value, copy ? CID : null), 'Classe creata').then(close).catch(() => {}) }, 'Crea classe')),
+  ]);
+}
+function renderClasses(main) {
+  const list = sortedClasses();
+  pg(main, [h('button', { class: 'back', onclick: () => { A.more = null; render(); } }, icon('left'), 'Altro'),
+    h('h1', {}, 'Classi'), h('p', { class: 'sub' }, `${list.length} ${list.length === 1 ? 'classe' : 'classi'} · ${Object.keys(A.members).length} studenti in tutto`)], [
+    list.map(c => h('button', { class: 'list-item', onclick: () => classSheet(c.id) },
+      h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, `Classe ${c.name}`), h('div', { class: 's' }, `${membersOf(c.id).length} studenti`, c.id === CID ? ' · quella aperta ora' : '')),
+      icon('right', 'chev'))),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: newClassSheet }, icon('plus'), 'Nuova classe')),
+    A.legacy ? [h('div', { class: 'section-title' }, 'Dati della versione precedente'),
+      migrated()
+        ? h('div', { class: 'card warn' }, h('p', { class: 'small' }, 'I vecchi dati sono già stati copiati nella loro classe, ma sono ancora presenti nel database. Quando hai controllato che è tutto a posto puoi eliminarli.'),
+          h('button', { class: 'btn sm danger-ghost', style: { marginTop: '10px' }, onclick: deleteLegacy }, icon('trash'), 'Elimina i vecchi dati'))
+        : h('div', { class: 'card warn' }, h('p', { class: 'small' }, 'Ci sono dati della versione a una sola classe non ancora spostati.'),
+          h('button', { class: 'btn sm', style: { marginTop: '10px' }, onclick: e => migrateLegacy('3B', e.currentTarget) }, 'Spostali in una nuova classe "3B"'))] : null,
+  ]);
+}
+function classSheet(cid) {
+  const c = A.classes[cid]; if (!c) return;
+  const name = h('input', { type: 'text', value: c.name || '', maxlength: '20' });
+  const n = membersOf(cid).length;
+  openSheet(`Classe ${c.name}`, close => [
+    h('label', { class: 'field' }, h('span', {}, 'Nome'), name),
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+        const v = name.value.trim().replace(/\s+/g, ' ');
+        if (!v) throw new Error('Scrivi il nome della classe');
+        if (Object.values(A.classes).some(x => x.id !== cid && (x.name || '').toLowerCase() === v.toLowerCase())) throw new Error('Esiste già una classe con questo nome');
+        await updateDoc(doc(db, 'classes', cid), { name: v });
+      }, 'Classe rinominata').then(close).catch(() => {}) }, 'Salva'),
+      cid !== CID ? h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'giri'; A.more = null; selectClass(cid); } }, 'Apri questa classe') : null,
+      h('button', { class: 'btn block danger-ghost', onclick: async () => {
+        if (n) return toast(`Prima rimuovi i ${n} studenti della classe`, 'error');
+        if (!await confirmSheet('Eliminare la classe?', `Verranno cancellati materie, orario, giri e calendario della classe ${esc(c.name)}. Non si può annullare.`, 'Elimina', true)) return;
+        await busy(null, () => deleteClassData(cid), 'Classe eliminata'); close();
+      } }, icon('trash'), 'Elimina classe')),
+    n ? h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Si può eliminare solo una classe senza studenti.') : null,
+  ]);
+}
+async function deleteClassData(cid) {
+  const ops = [];
+  for (const coll of [...CLASS_COLLS, 'students']) (await getDocs(collection(db, 'classes', cid, coll))).forEach(d => ops.push(['delete', d.ref]));
+  for (const r of (await getDocs(collection(db, 'classes', cid, 'rounds'))).docs) {
+    for (const sub of ['votes', 'private']) (await getDocs(collection(db, 'classes', cid, 'rounds', r.id, sub))).forEach(d => ops.push(['delete', d.ref]));
+    ops.push(['delete', r.ref]);
+  }
+  ops.push(['delete', doc(db, 'classes', cid)]);
+  if (cid === CID) selectClass(null);
+  await commitAll(ops);
+}
+/* Copia i dati della v9 (tutto nella radice) dentro classes/{cid}, con gli stessi ID: i riferimenti tra documenti restano validi */
+async function migrateLegacy(rawName, btn) {
+  const name = (rawName || '').trim() || '3B';
+  if (!await confirmSheet('Spostare i dati?', `Studenti, materie, orario, giri, voti, calendario e richieste vengono copiati nella classe <b>${esc(name)}</b>. Account e password degli studenti restano gli stessi. I vecchi dati non vengono cancellati: potrai eliminarli dopo aver controllato.`, 'Sposta i dati')) return;
+  await busy(btn, async () => {
+    const cid = A.classes['3b'] ? doc(collection(db, 'classes')).id : '3b';
+    const to = (...p) => doc(db, 'classes', cid, ...p);
+    const ops = [];
+    for (const coll of LEGACY_COLLS) {
+      (await getDocs(collection(db, coll))).forEach(d => {
+        ops.push(['set', to(coll, d.id), d.data()]);
+        if (coll === 'students') ops.push(['set', doc(db, 'members', d.id), { classId: cid, username: d.data().username || '' }]);
+      });
+    }
+    for (const r of (await getDocs(collection(db, 'rounds'))).docs) {
+      ops.push(['set', to('rounds', r.id), r.data()]);
+      for (const sub of ['votes', 'private']) (await getDocs(collection(db, 'rounds', r.id, sub))).forEach(d => ops.push(['set', to('rounds', r.id, sub, d.id), d.data()]));
+    }
+    await commitAll(ops);
+    await setDoc(doc(db, 'classes', cid), { name, createdAt: serverTimestamp(), migratedFrom: 'legacy' });
+    store.set(CID_KEY, cid);
+  }, 'Dati spostati nella nuova classe').catch(() => {});
+}
+async function deleteLegacy() {
+  if (!await confirmSheet('Eliminare i vecchi dati?', 'Cancella la copia della versione precedente (quella fuori dalle classi). I dati nelle classi non vengono toccati. Non si può annullare.', 'Elimina', true)) return;
+  await busy(null, async () => {
+    const ops = [];
+    for (const coll of LEGACY_COLLS) (await getDocs(collection(db, coll))).forEach(d => ops.push(['delete', d.ref]));
+    for (const r of (await getDocs(collection(db, 'rounds'))).docs) {
+      for (const sub of ['votes', 'private']) (await getDocs(collection(db, 'rounds', r.id, sub))).forEach(d => ops.push(['delete', d.ref]));
+      ops.push(['delete', r.ref]);
+    }
+    await commitAll(ops);
+    A.legacy = false;
+  }, 'Vecchi dati eliminati');
+}
+
+/* =========================================================
    ALTRO (materie, account)
    ========================================================= */
 function renderMore(main) {
   clearFab();
   if (A.more === 'orario') return renderTimetable(main);
+  if (A.more === 'classi') return renderClasses(main);
   const subs = Object.values(A.subjects).sort((a, b) => a.name.localeCompare(b.name));
-  page(main, [h('h1', {}, 'Altro'), h('p', { class: 'sub' }, 'Materie e impostazioni')], [
+  const nCls = Object.keys(A.classes).length;
+  pg(main, [h('h1', {}, 'Altro'), h('p', { class: 'sub' }, `Materie, orario e impostazioni della ${className()}`)], [
+    h('button', { class: 'list-item', onclick: () => { A.more = 'classi'; window.scrollTo(0, 0); render(); } }, icon('school'),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, 'Classi'), h('div', { class: 's' }, `${nCls} ${nCls === 1 ? 'classe' : 'classi'} · crea, rinomina, cambia classe`)), icon('right', 'chev')),
+    h('button', { class: 'list-item', onclick: () => showTutorial() }, icon('book'),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, 'Guida per l\'admin'), h('div', { class: 's' }, 'Come si usa il pannello, passo per passo')), icon('right', 'chev')),
+    A.legacy && migrated() ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, h('span', { class: 'small' }, 'Ci sono ancora i vecchi dati della versione precedente: puoi eliminarli da Classi.')) : null,
+    h('div', { class: 'spacer' }), h('div', { class: 'spacer' }),
     h('div', { class: 'row', style: { justifyContent: 'space-between' } }, h('div', { class: 'section-title', style: { margin: '2px' } }, 'Materie'),
       h('button', { class: 'btn sm', onclick: () => subjectSheet() }, icon('plus'), 'Nuova')),
     subs.length ? subs.map(s => h('button', { class: 'list-item', onclick: () => subjectSheet(s) }, h('span', { class: 'sdot', style: { '--c': s.color, width: '22px', height: '22px', borderRadius: '8px' } }),
@@ -875,7 +1189,7 @@ function renderMore(main) {
       const hrs = ttHours().length; const n = C.WEEKDAYS.reduce((a, [w]) => a + ttRow(w).filter(c => !C.ttEmpty(c)).length, 0);
       return h('button', { class: 'list-item', onclick: () => { A.more = 'orario'; window.scrollTo(0, 0); render(); } }, icon('cal'),
         h('div', { class: 'grow' }, h('div', { class: 't' }, 'Orario settimanale'),
-          h('div', { class: 's' }, hrs ? `${hrs} ore al giorno · ${n} lezioni inserite` : 'Non ancora inserito')), icon('right', 'chev'));
+          h('div', { class: 's' }, hrs ? `${hrs} ore al giorno · ${n} lezioni inserite` + (upcomingChanges().length ? ` · ${upcomingChanges().length} variazioni in arrivo` : '') : 'Non ancora inserito')), icon('right', 'chev'));
     })(),
     h('div', { class: 'section-title' }, 'Sito'),
     h('a', { class: 'list-item', href: '../', target: '_blank', style: { color: 'inherit', textDecoration: 'none' } }, icon('ext'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Apri il sito studenti'))),
@@ -894,12 +1208,12 @@ function subjectSheet(s = null) {
     h('div', { class: 'actions' },
       h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
         const n = name.value.trim(); if (!n) throw new Error('Scrivi il nome della materia');
-        if (s) await updateDoc(doc(db, 'subjects', s.id), { name: n, color }); else await addDoc(collection(db, 'subjects'), { name: n, color });
+        if (s) await updateDoc(dref('subjects', s.id), { name: n, color }); else await addDoc(cref('subjects'), { name: n, color });
       }, 'Materia salvata').then(close).catch(() => {}) }, 'Salva'),
       s ? h('button', { class: 'btn block danger-ghost', onclick: async () => {
         const used = events().some(e => e.subjectId === s.id) || Object.values(A.rounds).some(r => r.subjectId === s.id) || C.subjectWeekdays(A.tt, s.id).length > 0;
         if (used) return toast('Materia in uso in eventi, giri o nell\'orario: non si può eliminare', 'error');
-        if (await confirmSheet('Eliminare la materia?', '', 'Elimina', true)) { await busy(null, () => deleteDoc(doc(db, 'subjects', s.id)), 'Materia eliminata'); close(); }
+        if (await confirmSheet('Eliminare la materia?', '', 'Elimina', true)) { await busy(null, () => deleteDoc(dref('subjects', s.id)), 'Materia eliminata'); close(); }
       } }, 'Elimina') : null),
   ]);
 }
@@ -918,13 +1232,13 @@ function normDays(days, n) {
   return out;
 }
 async function saveTT({ hours = ttHours(), days = A.tt?.days || {} } = {}) {
-  await setDoc(doc(db, 'timetable', 'week'), { hours, days: normDays(days, hours.length), updatedAt: serverTimestamp() });
+  await setDoc(dref('timetable', 'week'), { hours, days: normDays(days, hours.length), updatedAt: serverTimestamp() });
 }
 
 function renderTimetable(main) {
   const hours = ttHours(); const wd = A.ttDay; const row = ttRow(wd);
   const subsCount = Object.keys(A.subjects).length;
-  page(main, [
+  pg(main, [
     h('button', { class: 'back', onclick: () => { A.more = null; render(); } }, icon('left'), 'Altro'),
     h('h1', {}, 'Orario settimanale'),
     h('p', { class: 'sub' }, 'Lo vede tutta la classe nel calendario, sotto gli impegni del giorno.'),
@@ -952,6 +1266,18 @@ function renderTimetable(main) {
     h('div', { class: 'section-title' }, 'Tutta la settimana'),
     h('p', { class: 'small muted', style: { margin: '-4px 2px 10px' } }, 'Tocca una casella per modificarla.'),
     weekGrid(A.tt, A.subjects, { onCell: (w, i) => cellSheet(w, i) }),
+
+    h('div', { class: 'section-title' }, 'Variazioni di singole giornate'),
+    h('p', { class: 'small muted', style: { margin: '-4px 2px 10px' } }, 'Uscite anticipate, assemblee, cambi d\'ora: valgono solo per quella data. Si possono fare anche dal Calendario.'),
+    upcomingChanges().map(([d, ch]) => h('button', { class: 'list-item', onclick: () => dayChangeSheet(d) }, icon('clock'),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, C.cap(C.fmtLong(d))), h('div', { class: 's' }, ch.note || `${(ch.row || []).filter(c => !C.ttEmpty(c)).length} ore di lezione`)), icon('right', 'chev'))),
+    (() => {
+      const dIn = h('input', { type: 'date', min: C.todayISO() });
+      return h('div', { class: 'row', style: { marginTop: '8px', alignItems: 'stretch' } }, h('div', { class: 'grow' }, dIn),
+        h('button', { class: 'btn ghost', onclick: () => { if (!dIn.value) return toast('Scegli una data', 'error'); dayChangeSheet(dIn.value); } }, icon('plus'), 'Varia'));
+    })(),
+    pastChanges().length ? h('button', { class: 'btn sm line', style: { marginTop: '10px' }, onclick: e => busy(e.currentTarget,
+      () => updateDoc(dref('timetable', 'changes'), Object.fromEntries(pastChanges().map(d => [`dates.${d}`, deleteField()]))), 'Variazioni passate eliminate') }, `Elimina le ${pastChanges().length} variazioni passate`) : null,
 
     h('div', { class: 'section-title' }, 'Ore e orari'),
     hours.map((hr, i) => h('button', { class: 'list-item', onclick: () => hourSheet(i) },
@@ -1022,9 +1348,9 @@ function hourSheet(i = null) {
   ]);
 }
 
-function cellSheet(wd, i) {
+function cellSheet(wd, i, date = null, after = null) {
   const hr = ttHours()[i]; if (!hr) return;
-  const c = ttRow(wd)[i] || null;
+  const c = date ? C.dayRow(A.tt, A.ttChanges, date)[i] : (ttRow(wd)[i] || null);
   const subs = Object.values(A.subjects).sort((a, b) => a.name.localeCompare(b.name));
   let sel = C.ttEmpty(c) ? '' : c.s ? c.s : '__text';
   const text = h('input', { type: 'text', value: c?.t || '', placeholder: 'es. Religione, Ed. civica' });
@@ -1035,8 +1361,8 @@ function cellSheet(wd, i) {
     h('input', { type: 'radio', name: 'ttcell', checked: sel === val, onchange: () => { sel = val; if (val === '__text') setTimeout(() => text.focus(), 0); } }),
     color ? h('span', { class: 'sdot', style: { '--c': color, width: '18px', height: '18px', borderRadius: '6px' } }) : null,
     h('div', { class: 'grow', style: { fontWeight: '700' } }, label));
-  openSheet(`${dayLabel(wd)} · ${C.ordinal(i)} ora`, close => [
-    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, `${hr.start}–${hr.end}`),
+  openSheet(`${date ? C.cap(C.fmtShort(date)) : dayLabel(wd)} · ${C.ordinal(i)} ora`, close => [
+    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, `${hr.start}–${hr.end}` + (date ? ' · solo per questa data' : '')),
     subs.map(s => radio(s.id, s.name, s.color)),
     (() => {
       const r = h('input', { type: 'radio', name: 'ttcell', checked: sel === '__text', onchange: () => { sel = '__text'; } });
@@ -1055,11 +1381,57 @@ function cellSheet(wd, i) {
       if (sel === '__text') { const t = text.value.trim(); if (!t) throw new Error('Scrivi il nome della lezione'); cell = { t }; }
       else if (sel) cell = { s: sel };
       if (cell && note.value.trim()) cell.n = note.value.trim();
-      const r = Array.from({ length: ttHours().length }, (_, j) => ttRow(wd)[j] || null);
+      const r = date ? C.dayRow(A.tt, A.ttChanges, date) : Array.from({ length: ttHours().length }, (_, j) => ttRow(wd)[j] || null);
       r[i] = cell; if (alsoNext && nextFree) r[i + 1] = cell ? { ...cell } : null;
-      await saveTT({ days: { ...(A.tt?.days || {}), [wd]: r } });
-    }, 'Orario aggiornato').then(close).catch(() => {}) }, 'Salva')),
+      if (date) await saveChange(date, r, C.dayChange(A.ttChanges, date)?.note || '');
+      else await saveTT({ days: { ...(A.tt?.days || {}), [wd]: r } });
+    }, date ? 'Variazione salvata' : 'Orario aggiornato').then(() => { close(); after?.(); }).catch(() => {}) }, 'Salva')),
   ]);
+}
+
+/* ---------- Variazioni di una singola giornata (timetable/changes) ---------- */
+const upcomingChanges = () => Object.entries(A.ttChanges?.dates || {}).filter(([d]) => d >= C.todayISO()).sort(([a], [b]) => a.localeCompare(b));
+const pastChanges = () => Object.keys(A.ttChanges?.dates || {}).filter(d => d < C.todayISO());
+const normRow = row => Array.from({ length: ttHours().length }, (_, i) => (C.ttEmpty(row[i]) ? null : row[i]));
+async function saveChange(date, row, note = '') {
+  await setDoc(dref('timetable', 'changes'), { dates: { [date]: { row: normRow(row), note: note.trim() } }, updatedAt: serverTimestamp() }, { merge: true });
+}
+const removeChange = date => updateDoc(dref('timetable', 'changes'), { [`dates.${date}`]: deleteField() });
+function dayChangeSheet(date) {
+  if (!ttHours().length) { toast('Prima imposta le ore in Altro → Orario settimanale', 'error'); return; }
+  if (C.isWeekend(date)) { toast('Sabato e domenica non si va a scuola', 'error'); return; }
+  const note = h('input', { type: 'text', placeholder: 'es. Uscita anticipata, assemblea d\'istituto', value: C.dayChange(A.ttChanges, date)?.note || '' });
+  openSheet('Orario di ' + C.fmtLong(date), (close, refill) => {
+    const later = () => setTimeout(refill, 200);
+    const ch = C.dayChange(A.ttChanges, date);
+    const base = Array.from({ length: ttHours().length }, (_, i) => ttRow(C.weekdayOf(date))[i] || null);
+    const row = C.dayRow(A.tt, A.ttChanges, date);
+    const differs = i => !(C.ttEmpty(base[i]) && C.ttEmpty(row[i])) && !C.sameCell(base[i], row[i]);
+    const evs = events().filter(e => e.date === date && !e.cancelled && e.type === 'interrogazione');
+    const missing = [...new Set(evs.map(e => e.subjectId))].filter(sid => !row.some(c => c?.s === sid));
+    const lastLesson = row.reduce((a, c, i) => (C.ttEmpty(c) ? a : i), -1);
+    return [
+      h('p', { class: 'small muted', style: { marginBottom: '10px' } }, ch ? 'Questa giornata ha un orario diverso dal solito. La settimana tipo non cambia.' : 'Tocca un\'ora per cambiarla solo in questa data. La settimana tipo non cambia.'),
+      missing.length ? h('div', { class: 'card warn', style: { marginBottom: '10px' } }, h('span', { class: 'small' }, `Attenzione: quel giorno ci sono interrogazioni di ${missing.map(id => subjName(A.subjects, id)).join(', ')}, ma la materia non è più nell'orario.`)) : null,
+      ttHours().map((hr, i) => {
+        const c = row[i]; const empty = C.ttEmpty(c);
+        return h('button', { class: 'tt-row' + (empty ? ' free' : '') + (differs(i) ? ' changed' : ''), style: { '--c': cellColor(c, A.subjects) }, onclick: () => cellSheet(C.weekdayOf(date), i, date, later) },
+          h('div', { class: 'tt-when' }, h('b', {}, `${C.ordinal(i)} ora`), h('small', {}, `${hr.start}–${hr.end}`)),
+          h('div', { class: 'tt-bar' }),
+          h('div', { class: 'grow' }, h('div', { class: 't' }, empty ? 'Libera' : cellName(c, A.subjects)),
+            differs(i) ? h('div', { class: 's' }, 'Di solito: ' + (C.ttEmpty(base[i]) ? 'libera' : cellName(base[i], A.subjects))) : (!empty && c.n ? h('div', { class: 's' }, c.n) : null)),
+          icon('right', 'chev'));
+      }),
+      lastLesson > 0 ? [h('div', { class: 'section-title' }, 'Uscita anticipata'),
+        h('div', { class: 'chips' }, ttHours().slice(0, lastLesson).map((_, i) => h('button', { class: 'chip', onclick: e => busy(e.currentTarget,
+          () => saveChange(date, row.map((x, j) => (j > i ? null : x)), note.value), `Uscita dopo la ${C.ordinal(i)} ora`).then(later).catch(() => {}) }, `dopo la ${C.ordinal(i)} ora`)))] : null,
+      h('label', { class: 'field', style: { marginTop: '16px' } }, h('span', {}, 'Nota per la classe'), note),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => saveChange(date, row, note.value), 'Variazione salvata').then(close).catch(() => {}) }, ch ? 'Salva' : 'Salva variazione'),
+        lastLesson >= 0 ? h('button', { class: 'btn block ghost', onclick: e => busy(e.currentTarget, () => saveChange(date, [], note.value || 'Nessuna lezione'), 'Giornata senza lezioni').then(later).catch(() => {}) }, 'Nessuna lezione in questo giorno') : null,
+        ch ? h('button', { class: 'btn block danger-ghost', onclick: e => busy(e.currentTarget, () => removeChange(date), 'Orario normale ripristinato').then(close).catch(() => {}) }, 'Ripristina l\'orario normale') : null),
+    ];
+  });
 }
 
 function copyDaySheet(wd) {
