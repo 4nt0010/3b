@@ -1,12 +1,23 @@
 rules_version = '2';
 // Regole di sicurezza per Interrogo (più classi).
+// Ruoli: super admin (admins/{uid}, creato a mano dalla console), admin di classe (classAdmins/{uid}), studenti (members/{uid}).
 // Da incollare in Firebase Console → Firestore Database → Regole → Pubblica.
 service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() { return request.auth != null; }
     function me() { return request.auth.uid; }
-    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    // Super admin: gestisce tutta la scuola
+    function isSuper() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function classDoc(cid) { return get(/databases/$(database)/documents/classes/$(cid)); }
+    // Admin di una classe (anche se la classe è ancora in attesa di approvazione)
+    function adminOf(cid) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/classAdmins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/classAdmins/$(request.auth.uid)).data.classId == cid;
+    }
+    // Può gestire i dati della classe: il super admin, o il suo admin se la classe è stata approvata
+    function canAdmin(cid) { return isSuper() || (adminOf(cid) && classDoc(cid).data.get('status', 'active') == 'active'); }
     function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
     // Lo studente appartiene alla classe cid (members/{uid}.classId)
     function inClass(cid) {
@@ -15,48 +26,73 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/members/$(request.auth.uid)).data.classId == cid;
     }
 
-    // Ruolo admin: ognuno può solo controllare se stesso. Si modifica solo dalla console.
+    // Super admin: ognuno può solo controllare se stesso. Si crea solo dalla console.
     match /admins/{id} {
       allow get: if signedIn() && id == me();
       allow list, write: if false;
     }
 
-    // A quale classe appartiene ogni account studente. Lo gestisce solo l'admin.
+    // Admin di classe. Si crea iscrivendosi dalla pagina admin (insieme alla sua classe, in attesa),
+    // oppure lo crea il super admin per una classe esistente.
+    match /classAdmins/{uid} {
+      allow get: if signedIn() && (uid == me() || isSuper());
+      allow list, update, delete: if isSuper();
+      allow create: if isSuper() || (signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['classId', 'username', 'name', 'createdAt'])
+        && request.resource.data.classId is string
+        && !exists(/databases/$(database)/documents/classes/$(request.resource.data.classId))
+        && getAfter(/databases/$(database)/documents/classes/$(request.resource.data.classId)).data.adminUid == me()
+        && getAfter(/databases/$(database)/documents/classes/$(request.resource.data.classId)).data.status == 'pending');
+    }
+
+    // A quale classe appartiene ogni account studente. Lo gestisce l'admin di quella classe.
     match /members/{uid} {
-      allow get: if isAdmin() || (signedIn() && uid == me());
-      allow list, write: if isAdmin();
+      allow get: if isSuper() || (signedIn() && uid == me()) || canAdmin(resource.data.classId);
+      allow list: if isSuper() || canAdmin(resource.data.classId);
+      allow create: if isSuper() || (request.resource.data.classId is string && canAdmin(request.resource.data.classId));
+      allow update: if isSuper() || (canAdmin(resource.data.classId) && request.resource.data.classId == resource.data.classId);
+      allow delete: if isSuper() || canAdmin(resource.data.classId);
     }
 
     match /classes/{cid} {
-      // Le classi le crea, rinomina ed elimina solo l'admin
-      allow read: if isAdmin() || inClass(cid);
-      allow write: if isAdmin();
+      allow read: if isSuper() || adminOf(cid) || inClass(cid);
+      // Iscrizione di un nuovo admin: crea la sua classe "in attesa", da approvare dal super admin
+      allow create: if isSuper() || (signedIn()
+        && request.resource.data.keys().hasOnly(['name', 'status', 'adminUid', 'adminName', 'adminUsername', 'createdAt'])
+        && request.resource.data.status == 'pending'
+        && request.resource.data.adminUid == me()
+        && request.resource.data.name is string && request.resource.data.name.size() <= 30
+        && !exists(/databases/$(database)/documents/classAdmins/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/classAdmins/$(request.auth.uid)).data.classId == cid);
+      // L'admin della classe può solo rinominarla; approvazione ed eliminazione spettano al super admin
+      allow update: if isSuper() || (canAdmin(cid) && onlyChanged(['name']) && request.resource.data.name is string && request.resource.data.name.size() <= 30);
+      allow delete: if isSuper();
 
       // Anagrafica studenti: visibile ai compagni (serve per i nomi nel calendario).
       // Lo studente può solo segnare di aver letto le regole.
       match /students/{id} {
-        allow read: if isAdmin() || inClass(cid);
-        allow create, delete: if isAdmin();
-        allow update: if isAdmin()
+        allow read: if canAdmin(cid) || inClass(cid);
+        allow create, delete: if canAdmin(cid);
+        allow update: if canAdmin(cid)
           || (inClass(cid) && id == me() && onlyChanged(['rulesAccepted']) && request.resource.data.rulesAccepted == true);
       }
 
       match /subjects/{id} {
-        allow read: if isAdmin() || inClass(cid);
-        allow write: if isAdmin();
+        allow read: if canAdmin(cid) || inClass(cid);
+        allow write: if canAdmin(cid);
       }
 
       // Orario settimanale (week) e variazioni di singole giornate (changes)
       match /timetable/{id} {
-        allow read: if isAdmin() || inClass(cid);
-        allow write: if isAdmin();
+        allow read: if canAdmin(cid) || inClass(cid);
+        allow write: if canAdmin(cid);
       }
 
       // Interrogazioni: visibili a tutta la classe. Verifiche: solo agli studenti assegnati.
       match /events/{id} {
-        allow read: if isAdmin()
+        allow read: if canAdmin(cid)
           || (inClass(cid) && (resource.data.type == 'interrogazione' || me() in resource.data.studentIds));
-        allow write: if isAdmin();
+        allow write: if canAdmin(cid);
       }
 
       match /rounds/{rid} {
@@ -75,75 +111,75 @@ service cloud.firestore {
         }
 
         // Le bozze le vede solo l'admin
-        allow read: if isAdmin() || (inClass(cid) && resource.data.visible == true);
-        allow write: if isAdmin();
+        allow read: if canAdmin(cid) || (inClass(cid) && resource.data.visible == true);
+        allow write: if canAdmin(cid);
 
         // Capienza e ipotesi di sorteggio: SOLO admin
         match /private/{docId} {
-          allow read, write: if isAdmin();
+          allow read, write: if canAdmin(cid);
         }
 
         // Voti: ognuno vede il proprio; gli altri solo se l'admin attiva "Mostra voti"
         match /votes/{vid} {
-          allow get: if isAdmin() || (inClass(cid) && (vid == me() || round().showVotes == true));
-          allow list: if isAdmin() || (inClass(cid) && round().showVotes == true);
-          allow create, update: if isAdmin() || (inClass(cid) && vid == me() && canVote() && validVote());
-          allow delete: if isAdmin();
+          allow get: if canAdmin(cid) || (inClass(cid) && (vid == me() || round().showVotes == true));
+          allow list: if canAdmin(cid) || (inClass(cid) && round().showVotes == true);
+          allow create, update: if canAdmin(cid) || (inClass(cid) && vid == me() && canVote() && validVote());
+          allow delete: if canAdmin(cid);
         }
       }
 
       // Giorni esclusi: li vede solo lo studente interessato
       match /exclusions/{sid} {
-        allow read: if isAdmin() || (inClass(cid) && sid == me());
-        allow write: if isAdmin();
+        allow read: if canAdmin(cid) || (inClass(cid) && sid == me());
+        allow write: if canAdmin(cid);
       }
 
       match /recoveries/{id} {
-        allow read: if isAdmin() || (inClass(cid) && resource.data.uid == me());
-        allow write: if isAdmin();
+        allow read: if canAdmin(cid) || (inClass(cid) && resource.data.uid == me());
+        allow write: if canAdmin(cid);
       }
 
       // Scambi: proposti da A, accettati da B, approvati dall'admin
       match /swaps/{id} {
-        allow read: if isAdmin()
+        allow read: if canAdmin(cid)
           || (inClass(cid) && (resource.data.fromUid == me() || resource.data.toUid == me()));
-        allow create: if isAdmin() || (inClass(cid)
+        allow create: if canAdmin(cid) || (inClass(cid)
           && request.resource.data.fromUid == me()
           && request.resource.data.toUid != me()
           && request.resource.data.status == 'pending_peer');
-        allow update: if isAdmin()
+        allow update: if canAdmin(cid)
           || (inClass(cid) && resource.data.toUid == me() && resource.data.status == 'pending_peer'
               && request.resource.data.status in ['pending_admin', 'declined'] && onlyChanged(['status', 'updatedAt']))
           || (inClass(cid) && resource.data.fromUid == me() && resource.data.status in ['pending_peer', 'pending_admin']
               && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));
-        allow delete: if isAdmin();
+        allow delete: if canAdmin(cid);
       }
 
       // Richieste di sblocco di una giornata: le fa lo studente, decide l'admin
       match /unlockRequests/{id} {
-        allow read: if isAdmin() || (inClass(cid) && resource.data.uid == me());
-        allow create: if isAdmin() || (inClass(cid)
+        allow read: if canAdmin(cid) || (inClass(cid) && resource.data.uid == me());
+        allow create: if canAdmin(cid) || (inClass(cid)
           && request.resource.data.keys().hasOnly(['uid', 'roundId', 'date', 'note', 'status', 'createdAt'])
           && request.resource.data.uid == me()
           && request.resource.data.status == 'pending'
           && request.resource.data.roundId is string
           && request.resource.data.date is string
           && request.resource.data.note is string && request.resource.data.note.size() <= 300);
-        allow update: if isAdmin()
+        allow update: if canAdmin(cid)
           || (inClass(cid) && resource.data.uid == me() && resource.data.status == 'pending'
               && request.resource.data.status == 'cancelled' && onlyChanged(['status', 'updatedAt']));
-        allow delete: if isAdmin();
+        allow delete: if canAdmin(cid);
       }
     }
 
     // Dati della versione precedente (una sola classe, nella radice del database).
     // Servono solo all'admin per importarli una volta nella nuova struttura e poi eliminarli.
     match /{coll}/{id} {
-      allow read, delete: if isAdmin()
+      allow read, delete: if isSuper()
         && coll in ['students', 'subjects', 'timetable', 'events', 'rounds', 'exclusions', 'recoveries', 'swaps'];
     }
     match /rounds/{rid}/{sub}/{id} {
-      allow read, delete: if isAdmin();
+      allow read, delete: if isSuper();
     }
   }
 }

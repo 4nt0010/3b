@@ -20,7 +20,7 @@ assets/
 manifest.webmanifest  per installarlo come app sul telefono
 firestore.rules       regole di sicurezza (da incollare in Firebase)
 
-Dati: admins/{uid}, members/{uid} = { classId, username }, classes/{cid} e dentro students, subjects,
+Dati: admins/{uid} (super admin), classAdmins/{uid} = { classId, username, name }, members/{uid} = { classId, username }, classes/{cid} e dentro students, subjects,
 timetable (week, changes), events, rounds (votes, private), exclusions, recoveries, swaps, unlockRequests.
 ```
 
@@ -40,7 +40,10 @@ timetable (week, changes), events, rounds (votes, private), exclusions, recoveri
 5. Quando hai controllato che è tutto a posto: **Altro → Classi → Elimina i vecchi dati**.
 
 ### Novità della v10
-- **Più classi**: Altro → Classi (o il pulsante "Classe …" in alto) per crearne, rinominarne e passare dall'una all'altra. Ogni classe ha studenti, materie, orario e giri suoi. Creando una classe puoi copiare materie e orario da quella aperta. Classi e account si creano solo dal pannello admin; i nomi utente restano unici tra tutte le classi.
+- **Più classi, un admin per classe**: ogni classe ha studenti, materie, orario e giri suoi, e parte vuota.
+  - **Super admin** (l'account creato in Firebase in `admins`): menu **Scuola** per approvare/rifiutare le classi nuove, crearne, eliminarle, creare o togliere gli account admin di ogni classe; entra in qualsiasi classe dal pulsante "Classe …" in alto.
+  - **Admin di classe**: si iscrive dalla pagina di accesso admin (*Crea un account admin per la tua classe*); la classe resta in attesa finché il super admin non la approva. Vede solo la sua classe.
+  - Gli account studenti si creano solo dal pannello admin; i nomi utente sono unici in tutta la scuola.
 - **Guida per l'admin**: si apre da sola al primo accesso, poi da Altro → Guida per l'admin.
 - **Variazioni d'orario di una singola giornata**: Calendario → giorno → *Varia* sopra l'orario (oppure Altro → Orario settimanale → Variazioni). Ore modificabili una per una, "uscita anticipata", "nessuna lezione", nota per la classe, ripristino.
 - **Sorteggio solo per alcuni**: nell'ipotesi, *Sorteggia solo alcuni studenti* → selezioni chi non ha trovato un accordo; gli altri restano fermi. Opzione per tenere conto dei loro voti.

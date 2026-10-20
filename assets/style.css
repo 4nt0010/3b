@@ -509,3 +509,4 @@ button.tt-c:active { transform: scale(.96); }
 @keyframes conf { 0% { opacity: 1; transform: translate(0,0) rotate(0); } 100% { opacity: 0; transform: translate(var(--x), calc(var(--y) + 120px)) rotate(var(--r)); } }
 @media (prefers-reduced-motion: reduce) { .draw-n.pop, .confetti i { animation: none !important; } }
 .card.violet-soft { background: #ece8ff; }
+.nav.six button { font-size: 10px; } .nav.six button svg { width: 20px; height: 20px; }

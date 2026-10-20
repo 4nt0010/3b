@@ -1,7 +1,7 @@
 import { initializeApp, deleteApp } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
 import {
   getAuth, initializeAuth, inMemoryPersistence, onAuthStateChanged, signInWithEmailAndPassword, signOut,
-  createUserWithEmailAndPassword, updatePassword, reauthenticateWithCredential, EmailAuthProvider,
+  createUserWithEmailAndPassword, updatePassword, reauthenticateWithCredential, EmailAuthProvider, deleteUser,
 } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js";
 import {
   getFirestore, collection, doc, onSnapshot, query, where, getDoc, getDocs, setDoc, updateDoc, addDoc,
@@ -38,6 +38,7 @@ export async function createStudentAccount(email, password) {
 
 export {
   onAuthStateChanged, signInWithEmailAndPassword, signOut, updatePassword, reauthenticateWithCredential, EmailAuthProvider,
+  createUserWithEmailAndPassword, deleteUser,
   collection, doc, onSnapshot, query, where, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch,
   serverTimestamp, arrayUnion, arrayRemove, deleteField, limit,
 };

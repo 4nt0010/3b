@@ -1,5 +1,6 @@
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword, signOut, createStudentAccount,
+  createUserWithEmailAndPassword, deleteUser, updatePassword, reauthenticateWithCredential, EmailAuthProvider, where,
   collection, doc, onSnapshot, getDoc, getDocs, setDoc, updateDoc, addDoc, deleteDoc, writeBatch, serverTimestamp, deleteField,
   arrayUnion, query, limit,
 } from './firebase.js?v=10';
@@ -25,29 +26,94 @@ function classData() {
 }
 function fresh() {
   return {
-    uid: null, classes: {}, members: {}, gready: new Set(), legacy: false, ...classData(),
+    uid: null, role: null, me: null, classes: {}, members: {}, classAdmins: {}, gready: new Set(), legacy: false, ...classData(),
     tab: 'giri', roundId: null, more: null, ttDay: C.isWeekend(C.todayISO()) ? '1' : C.weekdayOf(C.todayISO()), cal: { view: 'week', sel: C.nextWeekday(C.todayISO()), filter: 'all' },
   };
 }
 let unsubs = [], classUnsubs = [], roundSubs = {};
 
 /* ---------- Auth ---------- */
+/* Ruoli: 'super' = admins/{uid} (gestisce tutta la scuola ed entra in ogni classe)
+          'class' = classAdmins/{uid} (gestisce solo la sua classe, dopo l'approvazione del super admin) */
 renderLoader(root);
-onAuthStateChanged(auth, async user => {
+let signingUp = false; // durante l'iscrizione l'account esiste prima dei suoi documenti: aspetto
+onAuthStateChanged(auth, user => { if (!signingUp) route(user); });
+async function route(user) {
   stopAll(); Object.assign(A, fresh());
   if (!user) return showLogin();
   try {
-    const s = await getDoc(doc(db, 'admins', user.uid));
-    if (!s.exists()) return notAdmin();
-  } catch (e) { console.error(e); return notAdmin(); }
-  A.uid = user.uid; start();
-});
+    if ((await getDoc(doc(db, 'admins', user.uid))).exists()) { A.uid = user.uid; A.role = 'super'; return startSuper(); }
+    const ca = await getDoc(doc(db, 'classAdmins', user.uid));
+    if (ca.exists() && ca.data().classId) { A.uid = user.uid; A.role = 'class'; A.me = ca.data(); return startClassAdmin(ca.data().classId); }
+  } catch (e) { console.error(e); }
+  notAdmin();
+}
+const isSuper = () => A.role === 'super';
+const linkStyle = { display: 'block', textAlign: 'center', marginTop: '14px', color: 'rgba(19,19,23,.6)', fontWeight: '700' };
 function showLogin() {
   renderLogin(root, {
-    title: 'Pannello admin', sub: C.APP_NAME + ' · gestione delle classi', placeholder: 'admin',
+    title: 'Pannello admin', sub: C.APP_NAME + ' · gestione della classe', placeholder: 'nome utente',
     onSubmit: (u, p) => signInWithEmailAndPassword(auth, C.emailOf(u), p),
-    footer: h('a', { href: '../', class: 'small', style: { display: 'block', textAlign: 'center', marginTop: '14px', color: 'rgba(19,19,23,.6)', fontWeight: '700' } }, 'Vai al sito studenti'),
+    footer: [
+      h('button', { class: 'btn block ghost', style: { marginTop: '14px', background: 'rgba(255,255,255,.6)' }, onclick: renderSignup }, icon('plus'), 'Crea un account admin per la tua classe'),
+      h('a', { href: '../', class: 'small', style: linkStyle }, 'Vai al sito studenti'),
+    ],
   });
+}
+/* Iscrizione: crea l'account admin e la sua classe, che resta in attesa finché il super admin non la approva */
+function renderSignup() {
+  const cls = h('input', { type: 'text', placeholder: 'es. 4A', maxlength: '20', autocomplete: 'off' });
+  const name = h('input', { type: 'text', placeholder: 'es. Mario Rossi', maxlength: '60', autocomplete: 'name' });
+  const user = h('input', { type: 'text', placeholder: 'es. admin.4a', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', autocomplete: 'username' });
+  const pw = h('input', { type: 'password', autocomplete: 'new-password' }), pw2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  const err = h('div', { class: 'err' });
+  const btn = h('button', { class: 'btn block', type: 'submit' }, 'Crea account e classe');
+  const form = h('form', { class: 'login-form', onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    const c = cls.value.trim().replace(/\s+/g, ' '), n = name.value.trim().replace(/\s+/g, ' '), u = user.value.trim().toLowerCase();
+    if (!c || !n || !u) return (err.textContent = 'Compila tutti i campi');
+    if (!/^[a-z0-9][a-z0-9._-]{2,29}$/.test(u)) return (err.textContent = 'Nome utente: almeno 3 caratteri, solo lettere minuscole, numeri, punto o trattino');
+    if (pw.value.length < 6) return (err.textContent = 'La password deve avere almeno 6 caratteri');
+    if (pw.value !== pw2.value) return (err.textContent = 'Le due password non coincidono');
+    btn.disabled = true; btn.textContent = 'Creo l\'account…'; signingUp = true;
+    let cred = null;
+    try {
+      cred = await createUserWithEmailAndPassword(auth, C.emailOf(u), pw.value);
+      const uid = cred.user.uid; const cid = doc(collection(db, 'classes')).id;
+      const b = writeBatch(db);
+      b.set(doc(db, 'classes', cid), { name: c, status: 'pending', adminUid: uid, adminName: n, adminUsername: u, createdAt: serverTimestamp() });
+      b.set(doc(db, 'classAdmins', uid), { classId: cid, username: u, name: n, createdAt: serverTimestamp() });
+      await b.commit();
+      signingUp = false; route(auth.currentUser);
+    } catch (x) {
+      console.error(x);
+      if (cred) { try { await deleteUser(cred.user); } catch (y) { console.error(y); } }
+      signingUp = false;
+      err.textContent = /email-already-in-use/.test(x?.code || '') ? 'Questo nome utente è già usato: scegline un altro' : errMsg(x);
+      btn.disabled = false; btn.textContent = 'Crea account e classe';
+    }
+  } },
+  h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), cls),
+  h('label', { class: 'field' }, h('span', {}, 'Il tuo nome e cognome'), name),
+  h('label', { class: 'field' }, h('span', {}, 'Nome utente per entrare'), user),
+  h('label', { class: 'field' }, h('span', {}, 'Password'), pw),
+  h('label', { class: 'field' }, h('span', {}, 'Ripeti la password'), pw2),
+  h('p', { class: 'small muted', style: { marginBottom: '12px' } }, 'La classe parte vuota e resta in attesa finché l\'amministratore della scuola non la approva.'),
+  btn, err);
+  root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' },
+    h('div', { class: 'logo' }, mark(34)), h('h1', {}, 'Nuovo admin'), h('p', { class: 'sub' }, 'Crea il tuo account e la classe che gestirai.'), form,
+    h('button', { class: 'small', style: { ...linkStyle, width: '100%' }, onclick: showLogin }, 'Ho già un account: accedi'))));
+}
+/* Classe in attesa di approvazione o rifiutata */
+function renderWaiting(k) {
+  const rejected = k?.status === 'rejected';
+  root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' },
+    h('div', { class: 'logo' }, mark(34)),
+    h('h1', {}, !k ? 'Classe eliminata' : rejected ? 'Richiesta rifiutata' : 'In attesa di approvazione'),
+    h('p', { class: 'sub' }, !k ? 'La tua classe non esiste più. Contatta l\'amministratore della scuola.'
+      : rejected ? `La richiesta per la classe ${k.name} non è stata approvata. Contatta l'amministratore della scuola.`
+      : `Hai creato la classe ${k.name}. Potrai usarla appena l'amministratore della scuola la approva: questa pagina si aggiorna da sola.`),
+    h('button', { class: 'btn block line', style: { marginTop: '20px' }, onclick: () => signOut(auth) }, icon('logout'), 'Esci'))));
 }
 function notAdmin() {
   root.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-card' }, h('div', { class: 'logo' }, mark(34)),
@@ -65,12 +131,24 @@ function listen(key, ref, fn, list = classUnsubs, ready = () => A.ready) {
     e => { console.error(key, e); if (!/unlockRequests|ttc/.test(key)) toast(errMsg(e), 'error'); ready().add(key); schedule(); }));
 }
 const CLASS_KEYS = 10;
-function start() {
+// Admin di classe: vede solo la sua classe e i suoi studenti
+function startClassAdmin(cid) {
   const g = () => A.gready;
+  listen('classes', doc(db, 'classes', cid), s => {
+    A.classes = s.exists() ? { [cid]: { id: cid, ...s.data() } } : {};
+    const active = s.exists() && (s.data().status || 'active') === 'active';
+    if (active && CID !== cid) selectClass(cid);
+    if (!active && CID) selectClass(null);
+  }, unsubs, g);
+  listen('members', query(collection(db, 'members'), where('classId', '==', cid)), q => { A.members = {}; q.forEach(d => (A.members[d.id] = d.data())); }, unsubs, g);
+}
+function startSuper() {
+  const g = () => A.gready;
+  listen('classAdmins', collection(db, 'classAdmins'), q => (A.classAdmins = toMap(q)), unsubs, () => new Set());
   listen('classes', collection(db, 'classes'), q => {
     A.classes = toMap(q);
     if (CID && !A.classes[CID]) selectClass(null);
-    if (!CID) { const saved = store.get(CID_KEY); const ids = sortedClasses().map(c => c.id); const pick = ids.includes(saved) ? saved : ids[0]; if (pick) selectClass(pick); }
+    if (!CID) { const saved = store.get(CID_KEY); const ids = sortedClasses().filter(isActive).map(c => c.id); const pick = ids.includes(saved) ? saved : ids[0]; if (pick) selectClass(pick); }
   }, unsubs, g);
   listen('members', collection(db, 'members'), q => { A.members = {}; q.forEach(d => (A.members[d.id] = d.data())); }, unsubs, g);
   checkLegacy();
@@ -96,6 +174,7 @@ function selectClass(cid) {
   listen('unlockRequests', cref('unlockRequests'), q => (A.unlockReqs = toMap(q)));
   schedule();
 }
+const isActive = c => (c?.status || 'active') === 'active';
 const sortedClasses = () => Object.values(A.classes).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'it', { numeric: true }));
 const className = (cid = CID) => A.classes[cid]?.name || 'Classe';
 function syncRoundSubs() {
@@ -138,33 +217,37 @@ function render() {
   const a = document.activeElement;
   if (a && root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { a.addEventListener('blur', () => setTimeout(schedule, 400), { once: true }); return; }
   if (A.gready.size < 2) return renderLoader(root);
-  if (!CID) { clearFab(); return renderNoClass(); }
+  if (!CID) { clearFab(); return A.role === 'class' ? renderWaiting(A.classes[A.me.classId]) : renderNoClass(); }
   if (A.ready.size < CLASS_KEYS) return renderLoader(root);
-  const badges = { richieste: Object.values(A.swaps).filter(s => s.status === 'pending_admin').length + Object.values(A.recov).filter(r => r.status === 'open').length
+  const tabs = isSuper() ? [...TABS, { id: 'scuola', label: 'Scuola', icon: 'school' }] : TABS;
+  if (!tabs.some(t => t.id === A.tab)) A.tab = 'giri';
+  const badges = { scuola: Object.values(A.classes).filter(c => c.status === 'pending').length, richieste: Object.values(A.swaps).filter(s => s.status === 'pending_admin').length + Object.values(A.recov).filter(r => r.status === 'open').length
     + Object.values(A.unlockReqs).filter(r => r.status === 'pending').length };
   const y = window.scrollY;
-  const main = shell(root, TABS, A.tab, t => { A.tab = t; A.roundId = null; A.more = null; window.scrollTo(0, 0); render(); }, badges, className());
-  ({ giri: renderRounds, cal: renderCal, studenti: renderStudents, richieste: renderRequests, altro: renderMore })[A.tab](main);
+  const main = shell(root, tabs, A.tab, t => { A.tab = t; A.roundId = null; A.more = null; window.scrollTo(0, 0); render(); }, badges, className());
+  if (tabs.length > 5) root.querySelector('.nav')?.classList.add('six');
+  ({ giri: renderRounds, cal: renderCal, studenti: renderStudents, richieste: renderRequests, altro: renderMore, scuola: renderSchool })[A.tab](main);
   window.scrollTo(0, y);
-  if (!store.get(TUT_KEY) && !document.querySelector('.sheet.show, .draw-ov')) { store.set(TUT_KEY, '1'); setTimeout(() => showTutorial(), 300); }
+  if (!store.get(TUT_KEY + '.' + A.uid) && !document.querySelector('.sheet.show, .draw-ov')) { store.set(TUT_KEY + '.' + A.uid, '1'); setTimeout(() => showTutorial(), 300); }
 }
 /* Ogni pagina mostra in alto la classe su cui si sta lavorando: toccandola si cambia classe */
 function classBar() {
-  const n = Object.keys(A.classes).length;
+  if (!isSuper()) return h('div', { class: 'class-bar' }, h('span', { class: 'class-chip' }, icon('school'), `Classe ${className()}`));
   return h('div', { class: 'class-bar' },
-    h('button', { class: 'class-chip', 'aria-label': 'Cambia classe', onclick: classPicker }, icon('school'), `Classe ${className()}`, n > 1 ? icon('right', 'chev') : null));
+    h('button', { class: 'class-chip', 'aria-label': 'Cambia classe', onclick: classPicker }, icon('school'), `Classe ${className()}`, icon('right', 'chev')),
+    h('span', { class: 'pill dark' }, 'Super admin'));
 }
 const pg = (main, hero, body) => page(main, [classBar(), hero], body);
 function classPicker() {
   openSheet('Classi', close => [
     h('p', { class: 'small muted', style: { marginBottom: '6px' } }, 'Scegli la classe su cui lavorare. Ogni classe ha i suoi studenti, materie, orario e giri.'),
-    sortedClasses().map(c => h('button', { class: 'list-item', onclick: () => { close(); if (c.id !== CID) { A.tab = 'giri'; A.more = null; window.scrollTo(0, 0); selectClass(c.id); } } },
+    sortedClasses().filter(isActive).map(c => h('button', { class: 'list-item', onclick: () => { close(); if (c.id !== CID) { A.tab = 'giri'; A.more = null; window.scrollTo(0, 0); selectClass(c.id); } } },
       h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
       h('div', { class: 'grow' }, h('div', { class: 't' }, `Classe ${c.name}`), h('div', { class: 's' }, `${membersOf(c.id).length} studenti`)),
       c.id === CID ? h('span', { class: 'pill lime' }, 'Attuale') : icon('right', 'chev'))),
     h('div', { class: 'actions' },
       h('button', { class: 'btn block', onclick: () => { close(); newClassSheet(); } }, icon('plus'), 'Nuova classe'),
-      h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'altro'; A.more = 'classi'; window.scrollTo(0, 0); render(); } }, 'Gestisci le classi')),
+      h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'scuola'; A.more = null; window.scrollTo(0, 0); render(); } }, 'Gestione della scuola')),
   ]);
 }
 const membersOf = cid => Object.entries(A.members).filter(([, m]) => m.classId === cid).map(([id]) => id);
@@ -809,10 +892,16 @@ function addStudentsSheet() {
       const taken = new Set([...Object.values(A.students).map(s => s.username), ...Object.values(A.members).map(m => m.username).filter(Boolean)]); results = [];
       for (const [i, p] of lines.entries()) {
         btn.textContent = `Creo ${i + 1} di ${lines.length}…`;
-        const username = C.uniqueUsername(C.baseUsername(p.first, p.last), taken);
-        const pw = C.initialPassword(username);
+        let username = C.uniqueUsername(C.baseUsername(p.first, p.last), taken);
+        let pw = C.initialPassword(username);
         try {
-          const uid = await createStudentAccount(C.emailOf(username), pw);
+          // il nome utente può essere già usato in un'altra classe (che l'admin di classe non vede): provo il numero successivo
+          let uid = null;
+          for (let k = 0; k < 20 && !uid; k++) {
+            try { uid = await createStudentAccount(C.emailOf(username), pw); }
+            catch (x) { if (!/email-already-in-use/.test(x?.code || '')) throw x; taken.add(username); username = C.uniqueUsername(C.baseUsername(p.first, p.last), taken); pw = C.initialPassword(username); }
+          }
+          if (!uid) throw new Error('Nome utente non disponibile');
           const b = writeBatch(db);
           b.set(dref('students', uid), { first: p.first, last: p.last, username, rulesAccepted: false, createdAt: serverTimestamp() });
           b.set(doc(db, 'members', uid), { classId: CID, username });
@@ -1007,8 +1096,10 @@ function recoverSheet(rec) {
 function go(tab, more = null) { return () => { A.tab = tab; A.more = more; A.roundId = null; window.scrollTo(0, 0); render(); }; }
 function showTutorial() {
   stepsSheet('Guida per l\'admin', [
-    { icon: 'school', title: `Benvenuto su ${C.APP_NAME}`, html: `<p>Da qui gestisci le interrogazioni programmate di <b>una o più classi</b>.</p><p>In alto in ogni pagina vedi la classe su cui stai lavorando: toccala per passare a un'altra o crearne una nuova. Ogni classe ha i suoi studenti, materie, orario e giri.</p><p>Classi e account si creano <b>solo da questo pannello</b>.</p>`, action: { label: 'Vai alle classi', go: go('altro', 'classi') } },
-    { icon: 'users', title: 'Studenti', html: `<p>In <b>Studenti → +</b> incolla l'elenco della classe, un nome per riga ("Nome Cognome"; per nomi composti: "Maria Grazia, De Luca").</p><ul><li>Nome utente: <b>nome.cognome</b>, password iniziale uguale.</li><li>I nomi utente sono unici tra tutte le classi: per gli omonimi si aggiunge un numero.</li><li>Nella scheda dello studente imposti un <b>giorno fisso escluso</b> (es. atleta) o singole <b>date escluse</b>.</li></ul>`, action: { label: 'Vai agli studenti', go: go('studenti') } },
+    isSuper()
+      ? { icon: 'school', title: 'Sei il super admin', html: `<p>Gestisci tutta la scuola: nel menu <b>Scuola</b> approvi le classi create dagli admin, crei classi nuove (partono vuote) e crei o togli gli account admin di ogni classe.</p><p>Puoi entrare in qualsiasi classe: tocca "Classe …" in alto in ogni pagina.</p>`, action: { label: 'Vai alla scuola', go: go('scuola') } }
+      : { icon: 'school', title: `Benvenuto su ${C.APP_NAME}`, html: `<p>Da qui gestisci le interrogazioni programmate della <b>classe ${esc(className())}</b>. La classe parte vuota: segui i passi di questa guida per prepararla.</p><p>Gli account degli studenti si creano <b>solo da questo pannello</b>.</p>` },
+    { icon: 'users', title: 'Studenti', html: `<p>In <b>Studenti → +</b> incolla l'elenco della classe, un nome per riga ("Nome Cognome"; per nomi composti: "Maria Grazia, De Luca").</p><ul><li>Nome utente: <b>nome.cognome</b>, password iniziale uguale.</li><li>I nomi utente sono unici in tutta la scuola: per gli omonimi si aggiunge un numero.</li><li>Nella scheda dello studente imposti un <b>giorno fisso escluso</b> (es. atleta) o singole <b>date escluse</b>.</li></ul>`, action: { label: 'Vai agli studenti', go: go('studenti') } },
     { icon: 'palette', title: 'Materie e orario', html: `<p>In <b>Altro</b> crea le materie con il loro colore, poi apri <b>Orario settimanale</b>: imposta le ore e tocca ogni casella per scegliere la lezione.</p><p>Gli studenti vedono l'orario nel Calendario, sotto gli impegni del giorno.</p>`, action: { label: 'Vai ad Altro', go: go('altro') } },
     { icon: 'clock', title: 'Variazioni d\'orario', html: `<p>Se un giorno l'orario cambia (uscita anticipata, assemblea, cambio d'ora) non toccare la settimana tipo: nel <b>Calendario</b> scegli il giorno e premi <b>Varia</b> sopra l'orario.</p><ul><li>Tocca un'ora per cambiarla solo in quella data.</li><li>"Uscita anticipata" libera in un colpo le ore finali.</li><li>"Ripristina" torna all'orario normale.</li></ul><p>La classe vede la scritta "Orario variato" e la tua nota.</p>`, action: { label: 'Vai al calendario', go: go('cal') } },
     { icon: 'layers', title: 'Giri di interrogazioni', html: `<p>In <b>Giri → +</b> scegli materia, chi partecipa, i giorni in cui viene il docente e quanti posti ha ogni giorno (la classe non li vede mai).</p><p>Se la materia è nell'orario, <b>Aggiungi i prossimi giorni dall'orario</b> inserisce da solo le date di lezione.</p><p>Poi <b>Apri votazione</b>: ognuno sceglie una 1ª data e una riserva. Quando hai abbastanza voti, <b>Chiudi votazione</b>.</p>`, action: { label: 'Vai ai giri', go: go('giri') } },
@@ -1044,45 +1135,55 @@ function renderNoClass() {
         h('button', { class: 'btn block lime', onclick: e => migrateLegacy(name.value, e.currentTarget) }, 'Sposta i dati nella classe'),
       ] : [
         h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), name),
-        h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => createClass(name.value), 'Classe creata').catch(() => {}) }, 'Crea classe'),
+        h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => { const id = await createClass(name.value); A.tab = 'studenti'; selectClass(id); }, 'Classe creata').catch(() => {}) }, 'Crea classe'),
       ]),
     h('button', { class: 'btn block line', style: { marginTop: '12px' }, onclick: () => signOut(auth) }, icon('logout'), 'Esci'))));
 }
-async function createClass(rawName, copyFrom = null) {
+// Il super admin crea classi già attive e vuote: ognuna parte da zero
+async function createClass(rawName) {
   const name = rawName.trim().replace(/\s+/g, ' ');
   if (!name) throw new Error('Scrivi il nome della classe');
   if (Object.values(A.classes).some(c => (c.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Esiste già una classe con questo nome');
-  const ref = await addDoc(collection(db, 'classes'), { name, createdAt: serverTimestamp() });
-  if (copyFrom) {
-    const ops = [];
-    for (const [id, sj] of Object.entries(A.subjects)) { const { id: _x, ...data } = sj; ops.push(['set', doc(db, 'classes', ref.id, 'subjects', id), data]); }
-    if (A.tt) ops.push(['set', doc(db, 'classes', ref.id, 'timetable', 'week'), { ...A.tt, updatedAt: serverTimestamp() }]);
-    await commitAll(ops);
-  }
-  A.tab = 'studenti'; A.more = null;
-  selectClass(ref.id);
+  const ref = await addDoc(collection(db, 'classes'), { name, status: 'active', createdAt: serverTimestamp() });
   return ref.id;
 }
 function newClassSheet() {
   const name = h('input', { type: 'text', placeholder: 'es. 4A', maxlength: '20' });
-  let copy = Object.keys(A.subjects).length > 0;
   openSheet('Nuova classe', close => [
     h('label', { class: 'field' }, h('span', {}, 'Nome della classe'), name),
-    CID && Object.keys(A.subjects).length ? h('label', { class: 'check', style: { borderBottom: 0 } },
-      h('input', { type: 'checkbox', checked: copy, onchange: e => (copy = e.target.checked) }),
-      h('div', { class: 'grow' }, h('div', {}, `Copia materie e orario dalla ${className()}`), h('div', { class: 'small muted' }, 'Comodo se hanno gli stessi docenti: poi puoi modificarli.'))) : null,
-    h('p', { class: 'small muted' }, 'Dopo la creazione passi alla nuova classe: aggiungi gli studenti dalla sezione Studenti. Gli account li puoi creare solo da qui, dal pannello admin.'),
-    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, () => createClass(name.value, copy ? CID : null), 'Classe creata').then(close).catch(() => {}) }, 'Crea classe')),
+    h('p', { class: 'small muted' }, 'La classe parte vuota: niente studenti, materie, orario o giri. Dopo puoi crearle un account admin, oppure entrarci tu e configurarla.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+      const id = await createClass(name.value); close(); classSheet(id);
+    }, 'Classe creata').catch(() => {}) }, 'Crea classe')),
   ]);
 }
-function renderClasses(main) {
+const adminsOf = cid => Object.values(A.classAdmins).filter(x => x.classId === cid);
+const STATUS_CLS = { pending: ['In attesa', 'violet'], rejected: ['Rifiutata', 'danger'], active: ['Attiva', 'ok'] };
+/* Menu "Scuola" (solo super admin): richieste di nuove classi, tutte le classi, account admin */
+function renderSchool(main) {
+  clearFab();
   const list = sortedClasses();
-  pg(main, [h('button', { class: 'back', onclick: () => { A.more = null; render(); } }, icon('left'), 'Altro'),
-    h('h1', {}, 'Classi'), h('p', { class: 'sub' }, `${list.length} ${list.length === 1 ? 'classe' : 'classi'} · ${Object.keys(A.members).length} studenti in tutto`)], [
-    list.map(c => h('button', { class: 'list-item', onclick: () => classSheet(c.id) },
-      h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
-      h('div', { class: 'grow' }, h('div', { class: 't' }, `Classe ${c.name}`), h('div', { class: 's' }, `${membersOf(c.id).length} studenti`, c.id === CID ? ' · quella aperta ora' : '')),
-      icon('right', 'chev'))),
+  const pending = list.filter(c => c.status === 'pending');
+  const others = list.filter(c => c.status !== 'pending');
+  pg(main, [h('h1', {}, 'Scuola'), h('p', { class: 'sub' }, (() => { const n = others.filter(isActive).length; return `${n} ${n === 1 ? 'classe attiva' : 'classi attive'} · ${Object.keys(A.members).length} studenti · ${Object.keys(A.classAdmins).length} admin di classe`; })())], [
+    h('div', { class: 'section-title' }, `Richieste di nuove classi (${pending.length})`),
+    pending.length ? pending.map(c => h('div', { class: 'card white' },
+      h('div', { class: 'row' }, h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
+        h('div', { class: 'grow' }, h('b', {}, `Classe ${c.name}`), h('div', { class: 'small muted' }, `${c.adminName || 'Admin'} · `, h('span', { class: 'mono' }, c.adminUsername || '')))),
+      h('div', { class: 'row', style: { marginTop: '12px' } },
+        h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'classes', c.id), { status: 'active' }), 'Classe approvata').catch(() => {}) }, icon('check'), 'Approva'),
+        h('button', { class: 'btn sm ghost grow', onclick: async e => { const b = e.currentTarget; if (await confirmSheet('Rifiutare la richiesta?', `${esc(c.adminName || 'L\'admin')} non potrà usare la classe ${esc(c.name)}. Potrai sempre eliminarla dalla sua scheda.`, 'Rifiuta', true)) busy(b, () => updateDoc(doc(db, 'classes', c.id), { status: 'rejected' }), 'Richiesta rifiutata').catch(() => {}); } }, 'Rifiuta'))))
+      : h('p', { class: 'small muted' }, 'Nessuna richiesta. Quando un admin si iscrive dalla pagina di accesso, la sua classe compare qui.'),
+    h('div', { class: 'section-title' }, 'Classi'),
+    others.map(c => {
+      const [lab, cls] = STATUS_CLS[c.status || 'active'];
+      const adm = adminsOf(c.id);
+      return h('button', { class: 'list-item', onclick: () => classSheet(c.id) },
+        h('span', { class: 'av' }, (c.name || '?').slice(0, 3)),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, `Classe ${c.name}`),
+          h('div', { class: 's' }, `${membersOf(c.id).length} studenti · `, adm.length ? `admin: ${adm.map(x => x.username).join(', ')}` : 'nessun admin', c.id === CID ? ' · aperta ora' : '')),
+        isActive(c) ? null : h('span', { class: 'pill ' + cls }, lab), icon('right', 'chev'));
+    }),
     h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: newClassSheet }, icon('plus'), 'Nuova classe')),
     A.legacy ? [h('div', { class: 'section-title' }, 'Dati della versione precedente'),
       migrated()
@@ -1093,25 +1194,84 @@ function renderClasses(main) {
   ]);
 }
 function classSheet(cid) {
-  const c = A.classes[cid]; if (!c) return;
-  const name = h('input', { type: 'text', value: c.name || '', maxlength: '20' });
-  const n = membersOf(cid).length;
-  openSheet(`Classe ${c.name}`, close => [
-    h('label', { class: 'field' }, h('span', {}, 'Nome'), name),
-    h('div', { class: 'actions' },
-      h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+  if (!A.classes[cid]) return;
+  const name = h('input', { type: 'text', value: A.classes[cid].name || '', maxlength: '20' });
+  openSheet(`Classe ${A.classes[cid].name}`, (close, refill) => {
+    const c = A.classes[cid]; if (!c) { close(); return null; }
+    const n = membersOf(cid).length; const adm = adminsOf(cid);
+    const [lab, cls] = STATUS_CLS[c.status || 'active'];
+    const later = () => setTimeout(refill, 200);
+    return [
+      h('div', { class: 'row wrap', style: { marginBottom: '12px' } }, h('span', { class: 'pill ' + cls }, lab), h('span', { class: 'pill grey' }, `${n} studenti`)),
+      !isActive(c) ? h('div', { class: 'row', style: { marginBottom: '14px' } },
+        h('button', { class: 'btn sm lime grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'classes', cid), { status: 'active' }), 'Classe approvata').then(later).catch(() => {}) }, icon('check'), c.status === 'rejected' ? 'Approva comunque' : 'Approva'),
+        c.status === 'pending' ? h('button', { class: 'btn sm ghost grow', onclick: e => busy(e.currentTarget, () => updateDoc(doc(db, 'classes', cid), { status: 'rejected' }), 'Richiesta rifiutata').then(later).catch(() => {}) }, 'Rifiuta') : null) : null,
+      h('label', { class: 'field' }, h('span', {}, 'Nome'), name),
+      h('button', { class: 'btn sm ghost', onclick: e => busy(e.currentTarget, async () => {
         const v = name.value.trim().replace(/\s+/g, ' ');
         if (!v) throw new Error('Scrivi il nome della classe');
         if (Object.values(A.classes).some(x => x.id !== cid && (x.name || '').toLowerCase() === v.toLowerCase())) throw new Error('Esiste già una classe con questo nome');
         await updateDoc(doc(db, 'classes', cid), { name: v });
-      }, 'Classe rinominata').then(close).catch(() => {}) }, 'Salva'),
-      cid !== CID ? h('button', { class: 'btn block ghost', onclick: () => { close(); A.tab = 'giri'; A.more = null; selectClass(cid); } }, 'Apri questa classe') : null,
-      h('button', { class: 'btn block danger-ghost', onclick: async () => {
-        if (n) return toast(`Prima rimuovi i ${n} studenti della classe`, 'error');
-        if (!await confirmSheet('Eliminare la classe?', `Verranno cancellati materie, orario, giri e calendario della classe ${esc(c.name)}. Non si può annullare.`, 'Elimina', true)) return;
-        await busy(null, () => deleteClassData(cid), 'Classe eliminata'); close();
-      } }, icon('trash'), 'Elimina classe')),
-    n ? h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Si può eliminare solo una classe senza studenti.') : null,
+      }, 'Classe rinominata').then(later).catch(() => {}) }, 'Salva il nome'),
+
+      h('div', { class: 'section-title' }, 'Account admin della classe'),
+      adm.length ? adm.map(x => h('div', { class: 'list-item' }, h('span', { class: 'av' }, icon('user')),
+        h('div', { class: 'grow' }, h('div', { class: 't' }, x.name || x.username), h('div', { class: 's mono' }, x.username)),
+        h('button', { class: 'btn sm danger-ghost', onclick: async () => {
+          if (!await confirmSheet('Togliere l\'accesso?', `${esc(x.name || x.username)} non potrà più gestire la classe ${esc(c.name)}. Per liberare del tutto il nome utente elimina anche l'account da Firebase Console → Authentication.`, 'Togli accesso', true)) return;
+          busy(null, () => deleteDoc(doc(db, 'classAdmins', x.id)), 'Accesso tolto').then(later).catch(() => {});
+        } }, 'Togli')))
+        : h('p', { class: 'small muted' }, 'Nessun admin: per ora la gestisci solo tu.'),
+      h('button', { class: 'btn sm ghost', style: { marginTop: '8px' }, onclick: () => newAdminSheet(cid, later) }, icon('plus'), 'Crea un account admin'),
+
+      h('div', { class: 'actions' },
+        isActive(c) && cid !== CID ? h('button', { class: 'btn block', onclick: () => { close(); A.tab = 'giri'; A.more = null; window.scrollTo(0, 0); selectClass(cid); } }, 'Entra nella classe') : null,
+        h('button', { class: 'btn block danger-ghost', onclick: async () => {
+          if (n) return toast(`Prima rimuovi i ${n} studenti della classe`, 'error');
+          if (!await confirmSheet('Eliminare la classe?', `Verranno cancellati materie, orario, giri, calendario e accessi admin della classe ${esc(c.name)}. Non si può annullare.`, 'Elimina', true)) return;
+          await busy(null, () => deleteClassData(cid), 'Classe eliminata'); close();
+        } }, icon('trash'), 'Elimina classe')),
+      n ? h('p', { class: 'small muted', style: { marginTop: '8px' } }, 'Si può eliminare solo una classe senza studenti.') : null,
+    ];
+  });
+}
+/* Il super admin crea l'account admin di una classe (es. per la 3B) senza uscire dal proprio */
+function newAdminSheet(cid, after) {
+  const name = h('input', { type: 'text', placeholder: 'es. Mario Rossi', maxlength: '60' });
+  const user = h('input', { type: 'text', placeholder: `es. admin.${C.slug(className(cid))}`, autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false' });
+  const pw = h('input', { type: 'text', autocomplete: 'off', placeholder: 'almeno 6 caratteri' });
+  openSheet(`Admin della ${className(cid)}`, close => [
+    h('label', { class: 'field' }, h('span', {}, 'Nome e cognome'), name),
+    h('label', { class: 'field' }, h('span', {}, 'Nome utente'), user),
+    h('label', { class: 'field' }, h('span', {}, 'Password iniziale'), pw),
+    h('p', { class: 'small muted' }, 'Comunica nome utente e password alla persona: potrà cambiare la password da Altro, nel suo pannello.'),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+      const u = user.value.trim().toLowerCase(); const n = name.value.trim().replace(/\s+/g, ' ');
+      if (!n || !u) throw new Error('Compila nome e nome utente');
+      if (!/^[a-z0-9][a-z0-9._-]{2,29}$/.test(u)) throw new Error('Nome utente: almeno 3 caratteri, solo lettere minuscole, numeri, punto o trattino');
+      if (pw.value.length < 6) throw new Error('La password deve avere almeno 6 caratteri');
+      let uid;
+      try { uid = await createStudentAccount(C.emailOf(u), pw.value); }
+      catch (x) { if (/email-already-in-use/.test(x?.code || '')) throw new Error('Questo nome utente è già usato'); throw x; }
+      await setDoc(doc(db, 'classAdmins', uid), { classId: cid, username: u, name: n, createdAt: serverTimestamp() });
+      close(); after?.();
+    }, 'Account admin creato').catch(() => {}) }, 'Crea account')),
+  ]);
+}
+function changePasswordSheet() {
+  const cur = h('input', { type: 'password', autocomplete: 'current-password' });
+  const nw = h('input', { type: 'password', autocomplete: 'new-password' }), nw2 = h('input', { type: 'password', autocomplete: 'new-password' });
+  openSheet('Cambia password', close => [
+    h('label', { class: 'field' }, h('span', {}, 'Password attuale'), cur),
+    h('label', { class: 'field' }, h('span', {}, 'Nuova password'), nw),
+    h('label', { class: 'field' }, h('span', {}, 'Ripeti nuova password'), nw2),
+    h('div', { class: 'actions' }, h('button', { class: 'btn block', onclick: e => busy(e.currentTarget, async () => {
+      if (nw.value.length < 6) throw new Error('La nuova password deve avere almeno 6 caratteri');
+      if (nw.value !== nw2.value) throw new Error('Le due password non coincidono');
+      const u = auth.currentUser;
+      await reauthenticateWithCredential(u, EmailAuthProvider.credential(u.email, cur.value));
+      await updatePassword(u, nw.value);
+    }, 'Password cambiata').then(close).catch(() => {}) }, 'Salva password')),
   ]);
 }
 async function deleteClassData(cid) {
@@ -1121,6 +1281,7 @@ async function deleteClassData(cid) {
     for (const sub of ['votes', 'private']) (await getDocs(collection(db, 'classes', cid, 'rounds', r.id, sub))).forEach(d => ops.push(['delete', d.ref]));
     ops.push(['delete', r.ref]);
   }
+  adminsOf(cid).forEach(x => ops.push(['delete', doc(db, 'classAdmins', x.id)]));
   ops.push(['delete', doc(db, 'classes', cid)]);
   if (cid === CID) selectClass(null);
   await commitAll(ops);
@@ -1144,7 +1305,7 @@ async function migrateLegacy(rawName, btn) {
       for (const sub of ['votes', 'private']) (await getDocs(collection(db, 'rounds', r.id, sub))).forEach(d => ops.push(['set', to('rounds', r.id, sub, d.id), d.data()]));
     }
     await commitAll(ops);
-    await setDoc(doc(db, 'classes', cid), { name, createdAt: serverTimestamp(), migratedFrom: 'legacy' });
+    await setDoc(doc(db, 'classes', cid), { name, status: 'active', createdAt: serverTimestamp(), migratedFrom: 'legacy' });
     store.set(CID_KEY, cid);
   }, 'Dati spostati nella nuova classe').catch(() => {});
 }
@@ -1168,15 +1329,13 @@ async function deleteLegacy() {
 function renderMore(main) {
   clearFab();
   if (A.more === 'orario') return renderTimetable(main);
-  if (A.more === 'classi') return renderClasses(main);
   const subs = Object.values(A.subjects).sort((a, b) => a.name.localeCompare(b.name));
-  const nCls = Object.keys(A.classes).length;
   pg(main, [h('h1', {}, 'Altro'), h('p', { class: 'sub' }, `Materie, orario e impostazioni della ${className()}`)], [
-    h('button', { class: 'list-item', onclick: () => { A.more = 'classi'; window.scrollTo(0, 0); render(); } }, icon('school'),
-      h('div', { class: 'grow' }, h('div', { class: 't' }, 'Classi'), h('div', { class: 's' }, `${nCls} ${nCls === 1 ? 'classe' : 'classi'} · crea, rinomina, cambia classe`)), icon('right', 'chev')),
+    isSuper() ? h('button', { class: 'list-item', onclick: () => { A.tab = 'scuola'; window.scrollTo(0, 0); render(); } }, icon('school'),
+      h('div', { class: 'grow' }, h('div', { class: 't' }, 'Gestione della scuola'), h('div', { class: 's' }, 'Classi, richieste e account admin')), icon('right', 'chev')) : null,
     h('button', { class: 'list-item', onclick: () => showTutorial() }, icon('book'),
       h('div', { class: 'grow' }, h('div', { class: 't' }, 'Guida per l\'admin'), h('div', { class: 's' }, 'Come si usa il pannello, passo per passo')), icon('right', 'chev')),
-    A.legacy && migrated() ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, h('span', { class: 'small' }, 'Ci sono ancora i vecchi dati della versione precedente: puoi eliminarli da Classi.')) : null,
+    isSuper() && A.legacy && migrated() ? h('div', { class: 'card warn', style: { marginTop: '10px' } }, h('span', { class: 'small' }, 'Ci sono ancora i vecchi dati della versione precedente: puoi eliminarli da Scuola.')) : null,
     h('div', { class: 'spacer' }), h('div', { class: 'spacer' }),
     h('div', { class: 'row', style: { justifyContent: 'space-between' } }, h('div', { class: 'section-title', style: { margin: '2px' } }, 'Materie'),
       h('button', { class: 'btn sm', onclick: () => subjectSheet() }, icon('plus'), 'Nuova')),
@@ -1192,6 +1351,7 @@ function renderMore(main) {
     })(),
     h('div', { class: 'section-title' }, 'Sito'),
     h('a', { class: 'list-item', href: '../', target: '_blank', style: { color: 'inherit', textDecoration: 'none' } }, icon('ext'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Apri il sito studenti'))),
+    h('button', { class: 'list-item', onclick: changePasswordSheet }, icon('key'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Cambia password'), h('div', { class: 's mono' }, auth.currentUser?.email?.replace('@' + C.DOMAIN, '') || ''))),
     h('button', { class: 'list-item', onclick: async () => { if (await confirmSheet('Uscire?', 'Dovrai rientrare con le credenziali admin.', 'Esci')) signOut(auth); } }, icon('logout'), h('div', { class: 'grow' }, h('div', { class: 't' }, 'Esci'))),
     h('p', { class: 'small muted', style: { textAlign: 'center', marginTop: '24px' } }, `Versione ${C.VERSION}`),
   ]);
