@@ -413,6 +413,7 @@ function renderRound(main, r) {
     h('button', { class: 'btn ghost', onclick: async () => { await deleteDoc(dref('rounds', r.id, 'private', 'proposal')); upd({ status: 'voting' }, 'Votazione riaperta'); } }, 'Riapri votazione'),
     h('button', { class: 'btn ghost', onclick: () => roundSheet(r) }, 'Modifica date'));
   if (r.status === 'published') actions.append(
+    h('button', { class: 'btn lime', onclick: () => addDateSheet(r) }, icon('plus'), 'Aggiungi data'),
     h('button', { class: 'btn ghost', onclick: async () => { if (await confirmSheet('Archiviare il giro?', 'Le date restano nel calendario, ma il giro sparisce dalle votazioni.', 'Archivia')) upd({ status: 'archived', 'revote.active': false }, 'Giro archiviato'); } }, 'Archivia'));
   if (r.status === 'archived') actions.append(h('button', { class: 'btn ghost', onclick: () => upd({ status: 'published' }, 'Giro ripristinato') }, 'Ripristina'));
   body.push(actions);
@@ -498,13 +499,19 @@ function renderRound(main, r) {
     body.push(h('div', { class: 'section-title' }, 'Date pubblicate'));
     for (const d of sorted) {
       const evs = roundEvents(r).filter(e => e.date === d);
-      if (!evs.length) { body.push(h('div', { class: 'pday' }, h('div', { class: 'pday-h' }, C.cap(C.fmtLong(d)), h('span', { class: 'muted small' }, 'nessuno')))); continue; }
+      if (!evs.length) {
+        body.push(h('div', { class: 'pday' }, h('div', { class: 'pday-h' }, h('span', {}, C.cap(C.fmtLong(d)), h('span', { class: 'muted small', style: { marginLeft: '8px', fontWeight: '600' } }, 'nessuno')),
+          r.status === 'published' && d >= C.todayISO() ? h('button', { class: 'btn sm line', onclick: () => removeRoundDate(r, d) }, 'Togli data') : null)));
+        continue;
+      }
       for (const ev of evs) body.push(h('div', { class: 'pday', style: ev.cancelled ? { opacity: '.6' } : null },
         h('div', { class: 'pday-h' }, h('span', {}, C.cap(C.fmtLong(d)), ev.cancelled ? h('span', { class: 'pill danger', style: { marginLeft: '8px' } }, 'Annullata')
             : C.isDone(ev) ? h('span', { class: 'pill ok', style: { marginLeft: '8px' } }, icon('check'), 'Fatta') : null),
           !ev.cancelled && ev.date >= C.todayISO() ? h('button', { class: 'btn sm danger-ghost', onclick: () => cancelDaySheet(r, ev) }, 'Annulla giornata') : null),
         h('div', { class: 'chips' }, sortIds(ev.studentIds || []).map(id => h('button', { class: 'chip', onclick: ev.cancelled ? null : () => assignedStudentSheet(ev, id) }, C.fullName(st(id)))))));
     }
+    if (r.status === 'published') body.push(h('button', { class: 'btn block ghost', style: { marginTop: '10px' }, onclick: () => addDateSheet(r) }, icon('plus'), 'Aggiungi data'),
+      h('p', { class: 'small muted', style: { marginTop: '6px' } }, 'La nuova data compare tra quelle del giro: poi puoi spostarci gli studenti toccando il loro nome, usarla per i recuperi o per una giornata annullata.'));
     const recs = Object.values(A.recov).filter(x => x.roundId === r.id && x.status === 'open');
     if (recs.length) body.push(h('div', { class: 'card danger', style: { marginTop: '10px' } }, h('b', {}, 'Da recuperare: '), recs.map(x => C.fullName(st(x.uid))).join(', '),
       h('div', { class: 'small' }, 'Assegna le nuove date dalla sezione Richieste.')));
@@ -514,6 +521,62 @@ function renderRound(main, r) {
       h('p', { class: 'small', style: { marginBottom: '10px' } }, 'Cancella il giro e tutto ciò che è collegato: voti, posti, date pubblicate nel calendario, "da recuperare" e scambi. Non si può annullare.'),
       h('button', { class: 'btn block danger', onclick: () => deleteRound(r) }, icon('trash'), 'Elimina giro definitivamente')));
   pg(main, hero, body);
+}
+
+/* ---------- Aggiungere / togliere date a un giro già pubblicato ---------- */
+async function addRoundDate(r, d, cap) {
+  if (!d) throw new Error('Scegli una data');
+  if (C.isWeekend(d)) throw new Error('Sabato e domenica non si va a scuola');
+  if (d < C.todayISO()) throw new Error('Questa data è già passata');
+  if ((r.dates || []).includes(d)) throw new Error('Questa data è già nel giro');
+  const upd = { dates: [...new Set([...(r.dates || []), d])].sort() };
+  // se c'è una rivotazione in corso, la nuova data è subito votabile da chi rivota
+  if (r.revote?.active) upd['revote.dates'] = [...new Set([...(r.revote.dates || []), d])].sort();
+  const b = writeBatch(db);
+  b.update(dref('rounds', r.id), upd);
+  b.set(dref('rounds', r.id, 'private', 'config'), { caps: { [d]: cap } }, { merge: true });
+  await b.commit();
+}
+function addDateSheet(r0) {
+  const today = C.todayISO();
+  const dIn = h('input', { type: 'date', min: today });
+  const capIn = h('input', { type: 'number', min: '1', inputmode: 'numeric', value: String(A.configs[r0.id]?.defaultCap ?? 4) });
+  const cap = () => Math.max(1, Math.min(40, parseInt(capIn.value, 10) || 1));
+  openSheet('Aggiungi una data', close => {
+    const r = A.rounds[r0.id] || r0;
+    const have = new Set(r.dates || []);
+    // prossimi giorni in cui c'è lezione della materia (dall'orario, variazioni comprese)
+    const sugg = [];
+    for (let i = 1; i <= 28 && sugg.length < 6; i++) {
+      const d = C.addDays(today, i);
+      if (!C.isWeekend(d) && !have.has(d) && C.hasLesson(A.tt, A.ttChanges, d, r.subjectId)) sugg.push(d);
+    }
+    const add = (d, btn) => busy(btn, () => addRoundDate(A.rounds[r.id] || r, d, cap()), `Aggiunto ${C.fmtShort(d)}`).then(close).catch(() => {});
+    return [
+      h('p', { class: 'small muted', style: { marginBottom: '12px' } }, `${roundTitle(r)}. La data si aggiunge al giro già pubblicato: chi è già assegnato resta dov'è.`),
+      h('label', { class: 'field' }, h('span', {}, 'Posti in questa data (la classe non li vede)'), capIn),
+      sugg.length ? [h('div', { class: 'section-title' }, 'Prossime lezioni dall\'orario'),
+        h('div', { class: 'chips' }, sugg.map(d => h('button', { class: 'chip', onclick: e => add(d, e.currentTarget) }, icon('plus'), C.cap(C.fmtShort(d)))))] : null,
+      h('div', { class: 'section-title' }, sugg.length ? 'Oppure un\'altra data' : 'Data'),
+      h('div', { class: 'row', style: { alignItems: 'stretch' } }, h('div', { class: 'grow' }, dIn),
+        h('button', { class: 'btn', onclick: e => add(dIn.value, e.currentTarget) }, icon('plus'), 'Aggiungi')),
+      r.revote?.active ? h('p', { class: 'small muted', style: { marginTop: '10px' } }, 'C\'è una rivotazione in corso: la nuova data diventa subito disponibile anche per chi sta rivotando.') : null,
+    ];
+  });
+}
+async function removeRoundDate(r, d) {
+  if (roundEvents(r).some(e => e.date === d)) return toast('In questa data ci sono già interrogazioni: non si può togliere', 'error');
+  if (r.revote?.active && Object.values(A.votes[r.id] || {}).some(v => v.first === d || v.reserve === d)) return toast('Qualcuno ha già votato questa data nella rivotazione: non si può togliere', 'error');
+  if (A.proposals[r.id]?.dates?.includes(d)) return toast('C\'è un\'ipotesi in corso che usa questa data: accettala o rifalla prima', 'error');
+  if (!await confirmSheet('Togliere la data?', `${C.cap(C.fmtLong(d))} non farà più parte del giro.`, 'Togli')) return;
+  await busy(null, async () => {
+    const upd = { dates: (r.dates || []).filter(x => x !== d) };
+    if (r.revote?.active) upd['revote.dates'] = (r.revote.dates || []).filter(x => x !== d);
+    const b = writeBatch(db);
+    b.update(dref('rounds', r.id), upd);
+    b.set(dref('rounds', r.id, 'private', 'config'), { caps: { [d]: deleteField() } }, { merge: true });
+    await b.commit();
+  }, 'Data tolta').catch(() => {});
 }
 
 /* ---------- Sblocco date per singolo studente ---------- */
@@ -1105,7 +1168,7 @@ function showTutorial() {
     { icon: 'layers', title: 'Giri di interrogazioni', html: `<p>In <b>Giri → +</b> scegli materia, chi partecipa, i giorni in cui viene il docente e quanti posti ha ogni giorno (la classe non li vede mai).</p><p>Se la materia è nell'orario, <b>Aggiungi i prossimi giorni dall'orario</b> inserisce da solo le date di lezione.</p><p>Poi <b>Apri votazione</b>: ognuno sceglie una 1ª data e una riserva. Quando hai abbastanza voti, <b>Chiudi votazione</b>.</p>`, action: { label: 'Vai ai giri', go: go('giri') } },
     { icon: 'dice', title: 'Sorteggio', html: `<p>A votazione chiusa hai due strade, e in entrambe vedi prima un'<b>ipotesi</b>: nulla è pubblico finché non la accetti.</p><ul><li><b>Sorteggio automatico</b>: tutti al loro posto in base a voti, posti e date bloccate.</li><li><b>Sistemo a mano</b>: sposti tu i nomi, poi con <b>Sorteggia solo alcuni studenti</b> selezioni chi non trova un accordo. Solo loro vengono rimessi a sorte nei posti liberi; gli altri restano fermi.</li></ul><p>Il sorteggio parte con un'animazione che puoi proiettare in classe. Chi viene sorteggiato, aprendo il sito, vede la sua data uscire dal rullo.</p>` },
     { icon: 'inbox', title: 'Richieste', html: `<p>In <b>Richieste</b> trovi:</p><ul><li><b>Sblocchi</b>: uno studente chiede di poter scegliere una data bloccata perché vicina a un'altra sua interrogazione. "Sblocca" la rende disponibile solo per quel giro.</li><li><b>Scambi</b> già accettati dal compagno, da approvare.</li><li><b>Da recuperare</b>: assegna una nuova data.</li></ul>`, action: { label: 'Vai alle richieste', go: go('richieste') } },
-    { icon: 'cal', title: 'Calendario e imprevisti', html: `<p>Nel <b>Calendario</b> con il <b>+</b> aggiungi verifiche (solo promemoria) o interrogazioni singole.</p><p>Se il docente salta un giorno, apri l'evento e premi <b>Annulla giornata</b>: gli interrogati vengono spostati a sorte oppure rivotano solo loro.</p><p>Toccando un nome puoi spostarlo o segnarlo "da recuperare".</p><p>Questa guida resta sempre in <b>Altro → Guida per l'admin</b>.</p>` },
+    { icon: 'cal', title: 'Calendario e imprevisti', html: `<p>Nel <b>Calendario</b> con il <b>+</b> aggiungi verifiche (solo promemoria) o interrogazioni singole.</p><p>Se il docente salta un giorno, apri l'evento e premi <b>Annulla giornata</b>: gli interrogati vengono spostati a sorte oppure rivotano solo loro.</p><p>Toccando un nome puoi spostarlo o segnarlo "da recuperare".</p><p>In un giro pubblicato trovi sempre <b>Aggiungi data</b>: la nuova data entra nel giro (anche dopo una giornata annullata) e puoi spostarci gli studenti o usarla per i recuperi.</p><p>Questa guida resta sempre in <b>Altro → Guida per l'admin</b>.</p>` },
   ]);
 }
 

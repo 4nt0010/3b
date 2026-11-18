@@ -68,6 +68,7 @@ Bozza → Votazione aperta → Votazione chiusa → Ipotesi (sorteggio o sistema
 - Il **sorteggio**: chi rientra nei posti della prima scelta resta lì (si sorteggia tra chi l'ha votata se in esubero); chi resta fuori passa alla riserva; chi resta ancora fuori e chi non ha votato va in un giorno libero a caso.
 - Nulla viene pubblicato finché l'admin non accetta l'ipotesi.
 - **Orario e giri**: creando un giro, se la materia è nell'orario compare *Aggiungi i prossimi giorni dall'orario*, che inserisce i giorni di lezione della settimana successiva (ripremendolo aggiunge la settimana dopo).
+- **Aggiungi data**: in un giro pubblicato il pulsante è sempre presente (in alto e sotto le date pubblicate). Propone le prossime lezioni dall'orario; la data nuova parte vuota e puoi spostarci gli studenti, usarla per i recuperi o per una giornata annullata. Una data ancora vuota si può togliere.
 - **Annulla giornata**: sposta automaticamente gli interrogati (con ipotesi da accettare) oppure apre una rivotazione solo per loro.
 - **Scambi**: proposti da uno studente, accettati dal compagno, approvati dall'admin (sezione Richieste).
 - **Da recuperare**: dal giro pubblicato o dal calendario, tocca il nome di uno studente.
